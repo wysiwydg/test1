@@ -12,6 +12,8 @@ and probabilistic passes abstain.
 > entities, identity strategy, assumptions taken, open questions.
 > [`docs/02-vectorized-ingestion.md`](docs/02-vectorized-ingestion.md) — mapping,
 > normalization kernels, shredding, measured throughput.
+> [`docs/03-architecture.md`](docs/03-architecture.md) — the layering, runtime path,
+> where AI enters, code and storage maps.
 
 ### Measured, not asserted
 

@@ -36,7 +36,7 @@ from fastapi import APIRouter, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from psycopg.rows import dict_row
 
-from cmdm.api.deps import ConnectionDep, PrincipalDep, require
+from cmdm.deps import ConnectionDep, PrincipalDep, require
 from cmdm.governance.rbac import (
     Action,
     Principal,

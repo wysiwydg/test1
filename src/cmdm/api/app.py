@@ -35,13 +35,14 @@ from fastapi.responses import Response
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
-from cmdm.api.deps import (
+from cmdm.deps import (
     ConnectionDep,
     PrincipalDep,
     require,
 )
 from cmdm.governance.rbac import Action, log_access, mask_frame
 from cmdm.model.fields import PERSON
+from cmdm.ui.console import router as console_router
 
 __all__ = ["create_app", "app"]
 
@@ -467,8 +468,6 @@ def create_app() -> FastAPI:
             content=render_prometheus(conn),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
-
-    from cmdm.ui.console import router as console_router
 
     api.include_router(console_router)
     return api

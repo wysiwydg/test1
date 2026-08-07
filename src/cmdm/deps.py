@@ -1,8 +1,14 @@
 """Shared request dependencies.
 
-Extracted into their own module so that the API routes and the console routes
-resolve the *same* connection and authentication functions. Two copies of an
-authentication path is one place too many for an authorization bug to hide.
+Sits at the package root rather than inside ``cmdm.api`` deliberately. Both the
+API routes and the console routes need these, and homing them in either package
+makes the other import it -- which is a circular dependency that only appears to
+work because the import is deferred to call time. A shared dependency belongs
+below both of its consumers, not inside one of them.
+
+Extracting them also means the API and the console resolve the *same* connection
+and authentication functions. Two copies of an authentication path is one place
+too many for an authorization bug to hide.
 
 The extraction is also what makes the annotations work. With
 ``from __future__ import annotations`` every annotation is a string that FastAPI
