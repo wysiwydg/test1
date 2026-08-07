@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cmdm"
+version = "0.1.0"
+description = "Open-source, Python-native Customer Master Data Management for insurance data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+# The model registry itself is pure standard library and stays that way. It is
+# imported by ingestion workers, the API server and schema-generation scripts,
+# and none of them should be made to install Arrow just to learn what a column
+# means. Everything below is for the layers built on top of it.
+dependencies = []
+
+[project.optional-dependencies]
+# Vectorized layer: Arrow-backed column operations for normalization, blocking,
+# comparator scoring and survivorship.
+vector = [
+    "pyarrow>=16",
+    "polars>=1.0",
+    "duckdb>=1.0",
+]
+
+# ACID golden store.
+store = [
+    "psycopg[binary]>=3.2",
+]
+
+# API server.
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+]
+
+# String similarity and normalization kernels used by the matching stage.
+match = [
+    "rapidfuzz>=3.9",
+    "jellyfish>=1.1",
+    "phonenumbers>=8.13",
+]
+
+# Local open-source models for the fallback path. Invoked only on the undecided
+# band, never on the whole population.
+ai = [
+    "sentence-transformers>=3.0",
+    "llama-cpp-python>=0.3",
+]
+
+dev = [
+    "pytest>=8.0",
+    "pglast>=6.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cmdm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/cmdm"]
