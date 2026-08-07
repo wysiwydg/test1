@@ -6,9 +6,7 @@ Vectorized ingestion and matching over Apache Arrow, ACID golden-record storage
 in PostgreSQL, and local open-source models invoked only where the deterministic
 and probabilistic passes abstain.
 
-> **Status: canonical model, ingestion, standardization and identity
-> resolution are built and measured. Survivorship, golden-record writer, APIs,
-> UI, governance and observability are not yet built.**
+> **Status: all ten steps built, tested against real PostgreSQL 16.**
 >
 > [`docs/01-canonical-data-model.md`](docs/01-canonical-data-model.md) — the three
 > entities, identity strategy, assumptions taken, open questions.
@@ -24,6 +22,9 @@ and probabilistic passes abstain.
 | Blocking | 1,553× pair reduction, 99.2% blocking recall |
 | Resolution | precision **0.991**, recall **0.780** vs generator ground truth |
 | Grey-zone model | contributes **46% of all true positives at 100% precision** |
+| Full pipeline | 5,000 policies → 2,712 golden persons in **1.7 s**, one transaction |
+| Duplicate check | **21 ms** mean, same engine as the batch run |
+| Work queue | 6 workers, 300 jobs, **zero overlapping claims** |
 
 All figures from `data/life_admin_sample.csv` (5,000 policies, 3,881 parties),
 against a real PostgreSQL 16 instance. Reproduce with
@@ -108,12 +109,29 @@ src/cmdm/resolve/
     crossencoder.py Grey-zone classifier (ONNX + feature reference)
     clustering.py   SciPy connected components → master ids
     pipeline.py     Resolution run, persisted with its thresholds
+src/cmdm/survive/
+    engine.py       Registry-driven survivorship, one group-by, full lineage
+src/cmdm/store/
+    writer.py       SCD-2 golden writer, crosswalk, merge-pointer resolution
+src/cmdm/governance/
+    rbac.py         Roles, registry-driven PII masking, append-only access log
+    privacy.py      Consent history, erasure workflow
+src/cmdm/api/
+    deps.py         Shared connection and authentication dependencies
+    app.py          Read/search, submit, real-time duplicate check, /metrics
+src/cmdm/ui/
+    console.py      Business and steward consoles, server-rendered
+src/cmdm/observe/
+    metrics.py      Operational, match-quality and data-quality metrics
+src/cmdm/pipeline.py    End-to-end orchestration
 src/cmdm/mappings/
     life_admin.toml Example source mapping
 src/cmdm/sql/
     001_golden_schema.sql   Generated from the registry. Do not edit.
     002_pipeline.sql        Queue, batches, rules, match ledger
     003_standardization.sql Rule kinds and extraction targets
+    004_provenance_nullable.sql
+    005_governance.sql      Principals, consent, erasure, audit
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
@@ -125,8 +143,22 @@ docs/
 pip install -e ".[dev,vector]"
 python -m scripts.render_ddl                       # regenerate the DDL from the registry
 python -m scripts.generate_sample_data --rows 5000 # synthetic extract with real-world mess
-pytest                                             # 148 tests
+pytest                                             # 401 tests
 ```
+
+Running the API and consoles:
+
+```bash
+export CMDM_DSN="host=/tmp port=5432 user=postgres dbname=cmdm"
+export CMDM_ID_HASH_KEY="…"
+uvicorn cmdm.api.app:app --port 8000
+```
+
+- `/console` — business console: search, golden record, lineage
+- `/console/steward` — grey-zone review queue and learned-rule approvals
+- `/console/quality` — completeness and conformity
+- `/docs` — OpenAPI
+- `/metrics` — Prometheus
 
 Shredding a sample extract:
 
@@ -178,6 +210,17 @@ export CMDM_ID_HASH_KEY="…"   # never stored in the database
   policy they wrote; blocking the uncollapsed frame does quadratic work to
   rediscover what the source already stated. Collapsing first cuts candidate
   pairs 26×.
+- **The queue lives in Postgres** so landing a batch and obliging something to
+  process it are one transaction. A separate broker makes them two, and the gap
+  is where a batch becomes accepted-but-lost.
+- **Masking is driven by the registry's PII class**, so a new attribute is
+  protected by declaring what it is, not by remembering a list.
+- **The access log covers reads and refuses UPDATE and DELETE.** Who *looked* at
+  a record is the question asked after an incident.
+- **Erasure is a workflow, not a DELETE**, and records what it retained and why.
+  A required column is tombstoned rather than skipped.
+- **The console is server-rendered**, so a VIEWER's browser never receives the
+  PII it is not allowed to see.
 
 ## License
 
