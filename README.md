@@ -6,9 +6,11 @@ Vectorized ingestion and matching over Apache Arrow, ACID golden-record storage
 in PostgreSQL, and local open-source models invoked only where the deterministic
 and probabilistic passes abstain.
 
-> **Status: step 1 of N — canonical data model.**
-> See [`docs/01-canonical-data-model.md`](docs/01-canonical-data-model.md) for
-> the design, the assumptions taken, and the open questions.
+> **Status: step 2 of N — vectorized ingestion.**
+> [`docs/01-canonical-data-model.md`](docs/01-canonical-data-model.md) — the three
+> entities, identity strategy, assumptions taken, open questions.
+> [`docs/02-vectorized-ingestion.md`](docs/02-vectorized-ingestion.md) — mapping,
+> normalization kernels, shredding, measured throughput.
 
 ---
 
@@ -70,18 +72,38 @@ src/cmdm/model/
     ids.py          UUIDv7 keys, content hashing, keyed identifier hashing
     arrow.py        Arrow / Polars projection
     ddl.py          PostgreSQL projection
+src/cmdm/ingest/
+    mapping.py      Declarative source → canonical mapping, registry-validated
+    normalize.py    Vectorized kernels — every function returns a Polars expression
+    shred.py        Policy grain → Policy / Person / Relationship
+src/cmdm/mappings/
+    life_admin.toml Example source mapping
 src/cmdm/sql/
     001_golden_schema.sql   Generated. Do not edit.
 docs/
     01-canonical-data-model.md
+    02-vectorized-ingestion.md
 ```
 
 ## Getting started
 
 ```bash
-pip install -e ".[dev]"
-python -m scripts.render_ddl     # regenerate the DDL from the registry
-pytest                           # 90 tests
+pip install -e ".[dev,vector]"
+python -m scripts.render_ddl                       # regenerate the DDL from the registry
+python -m scripts.generate_sample_data --rows 5000 # synthetic extract with real-world mess
+pytest                                             # 148 tests
+```
+
+Shredding a sample extract:
+
+```python
+import polars as pl
+from cmdm.ingest.mapping import load_mapping
+from cmdm.ingest.shred import shred
+
+mapping = load_mapping("src/cmdm/mappings/life_admin.toml")
+raw = pl.read_csv("data/life_admin_sample.csv", infer_schema_length=0)
+frames = shred(raw, mapping)   # {"policy": ..., "person": ..., "relationship": ...}
 ```
 
 Applying the schema:
@@ -116,6 +138,12 @@ export CMDM_ID_HASH_KEY="…"   # never stored in the database
   is a compliance breach, not a data-quality blemish.
 - **Relationship separates system time from real-world time**, so a backdated
   agent-of-record change is representable.
+- **Normalization is expressions, not loops.** No `map_elements` anywhere in the
+  ingest path — 37,700 policies/s on the reference batch.
+- **Deterministic collapse runs before blocking.** An agent appears on every
+  policy they wrote; blocking the uncollapsed frame does quadratic work to
+  rediscover what the source already stated. Collapsing first cuts candidate
+  pairs 26×.
 
 ## License
 

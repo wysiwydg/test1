@@ -1,0 +1,121 @@
+# Mapping for a representative life administration platform.
+#
+# Structure: one [policy] table, then one [[party]] block per role carried in
+# the policy row. Validated against the field registry at load time, so a
+# canonical name that does not exist -- or one that the pipeline derives and a
+# source therefore cannot supply -- fails here rather than downstream.
+#
+# Onboarding another platform means copying this file and changing column
+# names. It should not require touching Python.
+
+source_system = "LIFE_ADMIN"
+source_timestamp_field = "LastUpdatedTs"
+default_country_code = "44"
+
+# Day-first. Stated per source because day-first and month-first are mutually
+# ambiguous and inspecting the values does not reliably settle it.
+date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y"]
+
+[policy]
+policy_number = { source = "PolicyNumber", transform = "policy_number" }
+product_code = "ProductCode"
+product_name = "ProductName"
+plan_code = "PlanCode"
+issuing_company_code = "IssuingCompany"
+branch_code = "BranchCode"
+distribution_channel = "Channel"
+issue_jurisdiction = "IssueState"
+underwriting_class = "UwClass"
+payment_method = "PaymentMethod"
+currency_code = { literal = "GBP" }
+
+application_date = { source = "ApplicationDate", transform = "date" }
+issue_date = { source = "IssueDate", transform = "date" }
+effective_date = { source = "EffectiveDate", transform = "date" }
+maturity_date = { source = "MaturityDate", transform = "date" }
+termination_date = { source = "TerminationDate", transform = "date" }
+paid_to_date = { source = "PaidToDate", transform = "date" }
+
+sum_assured_amount = { source = "SumAssured", transform = "money" }
+annual_premium_amount = { source = "AnnualPremium", transform = "money" }
+modal_premium_amount = { source = "ModalPremium", transform = "money" }
+account_value_amount = { source = "AccountValue", transform = "money" }
+
+policy_term_years = { source = "PolicyTerm", transform = "integer" }
+premium_paying_term_years = { source = "PremiumTerm", transform = "integer" }
+
+[policy.policy_status]
+source = "Status"
+transform = "enum"
+vocabulary = { "IN_FORCE" = "INFORCE", "INFORCE" = "INFORCE", "ACTIVE" = "INFORCE", "LAPSED" = "LAPSED", "SURRENDERED" = "SURRENDERED", "MATURED" = "MATURED", "CANCELLED" = "CANCELLED", "PAID_UP" = "PAID_UP", "DEATH_CLAIM" = "DEATH_CLAIM", "ISSUED" = "ISSUED", "PENDING" = "UNDERWRITING" }
+
+[policy.product_line]
+source = "ProductLine"
+transform = "enum"
+vocabulary = { "LIFE" = "LIFE", "TERM_LIFE" = "LIFE", "WHOLE_LIFE" = "LIFE", "ANNUITY" = "ANNUITY", "HEALTH" = "HEALTH", "CRITICAL_ILLNESS" = "CRITICAL_ILLNESS", "DISABILITY" = "DISABILITY" }
+
+[policy.premium_frequency]
+source = "PremiumFrequency"
+transform = "enum"
+vocabulary = { "M" = "MONTHLY", "MONTHLY" = "MONTHLY", "Q" = "QUARTERLY", "QUARTERLY" = "QUARTERLY", "H" = "SEMI_ANNUAL", "SEMI_ANNUAL" = "SEMI_ANNUAL", "A" = "ANNUAL", "ANNUAL" = "ANNUAL", "Y" = "ANNUAL", "S" = "SINGLE", "SINGLE" = "SINGLE" }
+
+# ---------------------------------------------------------------------------
+# Parties
+# ---------------------------------------------------------------------------
+
+[[party]]
+role = "OWNER"
+key_field = "OwnerCustomerId"
+key_kind = "OWNER_CUSTOMER_ID"
+
+[party.fields]
+full_name = { source = "OwnerName", transform = "name" }
+date_of_birth = { source = "OwnerDOB", transform = "date" }
+email_address = { source = "OwnerEmail", transform = "email" }
+phone_raw = "OwnerPhone"
+address_line1 = "OwnerAddress1"
+address_line2 = "OwnerAddress2"
+city = "OwnerCity"
+postal_code = "OwnerPostcode"
+country_code = "OwnerCountry"
+occupation = "OwnerOccupation"
+
+[party.fields.gender]
+source = "OwnerGender"
+transform = "enum"
+vocabulary = { "M" = "MALE", "MALE" = "MALE", "F" = "FEMALE", "FEMALE" = "FEMALE" }
+
+[[party]]
+role = "INSURED"
+key_field = "InsuredCustomerId"
+key_kind = "INSURED_CUSTOMER_ID"
+
+[party.fields]
+full_name = { source = "InsuredName", transform = "name" }
+date_of_birth = { source = "InsuredDOB", transform = "date" }
+email_address = { source = "InsuredEmail", transform = "email" }
+phone_raw = "InsuredPhone"
+address_line1 = "InsuredAddress1"
+address_line2 = "InsuredAddress2"
+city = "InsuredCity"
+postal_code = "InsuredPostcode"
+country_code = "InsuredCountry"
+occupation = "InsuredOccupation"
+
+[party.fields.gender]
+source = "InsuredGender"
+transform = "enum"
+vocabulary = { "M" = "MALE", "MALE" = "MALE", "F" = "FEMALE", "FEMALE" = "FEMALE" }
+
+[[party]]
+role = "AGENT"
+key_field = "AgentCode"
+key_kind = "AGENT_CODE"
+
+# Agent blocks carry far fewer attributes than owner or insured blocks. That is
+# why the party frames are concatenated diagonally rather than requiring every
+# block to declare every column.
+[party.fields]
+full_name = { source = "AgentName", transform = "name" }
+email_address = { source = "AgentEmail", transform = "email" }
+phone_raw = "AgentPhone"

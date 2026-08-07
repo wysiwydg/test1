@@ -10,3 +10,6 @@ dist/
 venv/
 *.parquet
 .env
+
+# Generated sample data. Recreate with: python -m scripts.generate_sample_data
+data/
