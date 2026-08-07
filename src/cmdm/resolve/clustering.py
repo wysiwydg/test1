@@ -75,6 +75,7 @@ def cluster_pairs(
     accepted_pairs: pl.DataFrame,
     all_ids: Sequence[str] | pl.Series,
     *,
+    id_column: str = "person_id",
     suspicious_size: int = SUSPICIOUS_CLUSTER_SIZE,
 ) -> ClusterResult:
     """Resolve accepted pairs into connected components and assign master ids.
@@ -86,29 +87,33 @@ def cluster_pairs(
 
     Master id is the lexicographically smallest member, so the assignment is
     deterministic and a re-run over identical edges reproduces it exactly.
+
+    ``id_column`` names the output column. It must match what the caller passed
+    to the resolver: resolution can run over source-scoped identities rather
+    than golden ids, and hardcoding a name here would silently mislabel them.
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
-    ids = pl.Series("person_id", all_ids, dtype=pl.String).unique().sort()
+    ids = pl.Series(id_column, all_ids, dtype=pl.String).unique().sort()
     n = ids.len()
 
     if n == 0:
         return ClusterResult(
             assignments=pl.DataFrame(
-                schema={"person_id": pl.String, "master_id": pl.String}
+                schema={id_column: pl.String, "master_id": pl.String}
             )
         )
 
     # Dense integer indices for the sparse matrix. The lookup frame is built once
     # and joined, rather than a Python dict comprehension over millions of ids.
-    index = pl.DataFrame({"person_id": ids}).with_row_index("idx")
+    index = pl.DataFrame({id_column: ids}).with_row_index("idx")
 
     if accepted_pairs.height:
         edges = (
             accepted_pairs.select("left_id", "right_id")
-            .join(index.rename({"person_id": "left_id", "idx": "left_idx"}), on="left_id")
-            .join(index.rename({"person_id": "right_id", "idx": "right_idx"}), on="right_id")
+            .join(index.rename({id_column: "left_id", "idx": "left_idx"}), on="left_id")
+            .join(index.rename({id_column: "right_id", "idx": "right_idx"}), on="right_id")
         )
         rows = edges["left_idx"].to_numpy()
         cols = edges["right_idx"].to_numpy()
@@ -128,19 +133,19 @@ def cluster_pairs(
     # Master id = smallest member id in the component. Deterministic, and it
     # keeps a stable id when a cluster later gains members.
     masters = assigned.group_by("label").agg(
-        pl.col("person_id").min().alias("master_id"),
+        pl.col(id_column).min().alias("master_id"),
         pl.len().alias("cluster_size"),
     )
     assignments = (
         assigned.join(masters, on="label")
-        .select("person_id", "master_id", "cluster_size")
+        .select(id_column, "master_id", "cluster_size")
     )
 
     sizes = masters["cluster_size"]
     suspicious = masters.filter(pl.col("cluster_size") >= suspicious_size)
 
     return ClusterResult(
-        assignments=assignments.select("person_id", "master_id"),
+        assignments=assignments.select(id_column, "master_id"),
         cluster_count=int(count),
         merged_records=int(assignments.filter(pl.col("cluster_size") > 1).height),
         largest_cluster=int(sizes.max() or 0),

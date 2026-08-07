@@ -125,7 +125,11 @@ def resolve(
     if parties.height < 2:
         empty = pl.DataFrame(schema={"left_id": pl.String, "right_id": pl.String})
         return (
-            cluster_pairs(empty, parties[id_column] if parties.height else []),
+            cluster_pairs(
+                empty,
+                parties[id_column] if parties.height else [],
+                id_column=id_column,
+            ),
             empty,
             report,
         )
@@ -136,7 +140,7 @@ def resolve(
     report.candidate_pairs = candidates.height
 
     if candidates.height == 0:
-        result = cluster_pairs(candidates, parties[id_column])
+        result = cluster_pairs(candidates, parties[id_column], id_column=id_column)
         report.clusters = result.cluster_count
         report.duration_ms = int((time.perf_counter() - started) * 1000)
         return result, candidates, report
@@ -195,7 +199,7 @@ def resolve(
         .alias("decided_by"),
     )
 
-    result = cluster_pairs(accepted, parties[id_column])
+    result = cluster_pairs(accepted, parties[id_column], id_column=id_column)
     report.clusters = result.cluster_count
     report.merged_records = result.merged_records
     report.largest_cluster = result.largest_cluster
