@@ -47,10 +47,18 @@ COLUMNS = [
 ]
 
 GIVEN = ["John", "Katherine", "Michael", "Sarah", "David", "Emma", "James",
-         "Olivia", "Robert", "Sophie", "José", "Ana", "Wei", "Priya", "Ahmed"]
+         "Olivia", "Robert", "Sophie", "José", "Ana", "Wei", "Priya", "Ahmed",
+         "Thomas", "Elizabeth", "Daniel", "Rebecca", "Christopher", "Margaret",
+         "Anthony", "Jennifer", "Nicholas", "Patricia", "Gregory", "Deborah",
+         "Alexander", "Christina", "Matthew", "Susan", "Peter", "Andrew",
+         "Joseph", "Laura", "Simon", "Rachel", "Martin", "Helen", "Paul"]
 MIDDLE = ["Michael", "Anne", "Lee", "Marie", "James", "Rose", ""]
 SURNAME = ["Smith", "Phillips", "O'Brien", "Peña", "Nguyen", "Patel", "Müller",
-           "Johnson", "Brown", "Taylor", "Wilson", "Davies", "Kowalski"]
+           "Johnson", "Brown", "Taylor", "Wilson", "Davies", "Kowalski",
+           "Anderson", "Thompson", "Robinson", "Walker", "Wright", "Hughes",
+           "Edwards", "Green", "Hall", "Wood", "Harris", "Clarke", "Jackson",
+           "Bennett", "Fletcher", "Morgan", "Hunter", "Sullivan", "Murphy",
+           "van der Berg", "de Souza", "Rossi", "Yamamoto", "Okafor", "Ibrahim"]
 NICKNAMES = {"John": "Jon", "Katherine": "Kate", "Michael": "Mike",
              "Robert": "Bob", "Sarah": "Sara", "James": "Jim"}
 STREETS = ["High Street", "North Avenue", "Church Lane", "Mill Road",
@@ -162,8 +170,16 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
             f"POL-{base_no:08d}", f"pol {base_no}", f"POL{base_no}"
         ][pol_style]
 
-        # A minority of owners are trusts, estates or companies.
-        if rng.random() < 0.12:
+        # A minority of owners are trusts, estates or companies. Such an owner
+        # gets its OWN customer id: a trust that owns a policy is a different
+        # party from the person insured under it, and giving both the same
+        # identifier would assert they are one party -- which would make the
+        # ground truth wrong and punish the matcher for correctly refusing to
+        # merge a company with a human.
+        owner_is_org = rng.random() < 0.12
+        owner_key = f"C-{owner['id']:06d}"
+        if owner_is_org:
+            owner_key = f"ORG-{owner['id']:06d}"
             owner_name = rng.choice(ORGS).format(
                 s=owner["surname"], g=owner["given"]
             )
@@ -180,9 +196,14 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
                 f"{prefix}Name": name,
                 f"{prefix}DOB": dob,
                 f"{prefix}Gender": gender,
+                # Person-unique, because real email addresses are. An address
+                # derived from the name alone would hand two different people
+                # with the same name an identical email, which no matcher can
+                # see past -- it would measure the generator, not the matcher.
                 f"{prefix}Email": "" if blank < 0.25 else
-                    f"{p['given'].lower()}.{p['surname'].lower()}@example.com"
-                    .replace("'", "").replace("é", "e").replace("ñ", "n").replace("ü", "u"),
+                    (f"{p['given'].lower()}.{p['surname'].lower()}{p['id']}@example.com"
+                     .replace("'", "").replace("é", "e").replace("ñ", "n")
+                     .replace("ü", "u")),
                 f"{prefix}Phone": "" if blank < 0.15 else _fmt_phone(p["phone"], rng.randrange(4)),
                 f"{prefix}Address1": f"{p['street_no']} {p['street']}",
                 f"{prefix}Address2": "" if rng.random() < 0.8 else f"Flat {rng.randrange(1, 12)}",
@@ -223,7 +244,7 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
             "PolicyTerm": str(rng.choice([10, 15, 20, 25, 30])),
             "PremiumTerm": str(rng.choice([10, 15, 20])),
             "LastUpdatedTs": (eff + timedelta(days=rng.randrange(1, 3000))).isoformat(),
-            "OwnerCustomerId": f"C-{owner['id']:06d}",
+            "OwnerCustomerId": owner_key,
             "InsuredCustomerId": f"C-{insured['id']:06d}",
             "AgentCode": agent["code"],
             "AgentName": agent["name"],
