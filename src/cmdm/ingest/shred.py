@@ -168,6 +168,12 @@ def _party_frame(
     frame = frame.with_columns(
         pl.when(simple).then(pl.col("name_tokens").list.get(0)).alias("given_name_derived"),
         pl.when(simple).then(pl.col("name_tokens").list.get(1)).alias("surname_derived"),
+        # Emitted even though the two-token path never populates it. The registry
+        # declares this column, and a learned EXTRACT rule that writes it is
+        # skipped outright if it is absent -- so omitting it would silently
+        # disable every mined rule for names carrying a middle component, which
+        # is the largest category there is.
+        pl.lit(None, dtype=pl.String).alias("middle_name_derived"),
         pl.when(simple)
         .then(pl.lit(0.75))
         .otherwise(pl.lit(0.0))
