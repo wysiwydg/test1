@@ -6,11 +6,28 @@ Vectorized ingestion and matching over Apache Arrow, ACID golden-record storage
 in PostgreSQL, and local open-source models invoked only where the deterministic
 and probabilistic passes abstain.
 
-> **Status: step 2 of N — vectorized ingestion.**
+> **Status: canonical model, ingestion, standardization and identity
+> resolution are built and measured. Survivorship, golden-record writer, APIs,
+> UI, governance and observability are not yet built.**
+>
 > [`docs/01-canonical-data-model.md`](docs/01-canonical-data-model.md) — the three
 > entities, identity strategy, assumptions taken, open questions.
 > [`docs/02-vectorized-ingestion.md`](docs/02-vectorized-ingestion.md) — mapping,
 > normalization kernels, shredding, measured throughput.
+
+### Measured, not asserted
+
+| Stage | Result |
+|---|---|
+| Shredding | 37,700 policies/s |
+| Standardization | deterministic pass 85.3% → **100%** after one learning cycle; AI share 14.7% → **0%** |
+| Blocking | 1,553× pair reduction, 99.2% blocking recall |
+| Resolution | precision **0.991**, recall **0.780** vs generator ground truth |
+| Grey-zone model | contributes **46% of all true positives at 100% precision** |
+
+All figures from `data/life_admin_sample.csv` (5,000 policies, 3,881 parties),
+against a real PostgreSQL 16 instance. Reproduce with
+`python -m scripts.generate_sample_data`.
 
 ---
 
@@ -76,10 +93,27 @@ src/cmdm/ingest/
     mapping.py      Declarative source → canonical mapping, registry-validated
     normalize.py    Vectorized kernels — every function returns a Polars expression
     shred.py        Policy grain → Policy / Person / Relationship
+src/cmdm/db/
+    engine.py       Pooled connections, forward-only migrations
+    queue.py        Postgres work queue (FOR UPDATE SKIP LOCKED)
+src/cmdm/standardize/
+    gate.py         Declared quality checks — decides who ever sees a model
+    rules.py        Learned rule store, gated PROPOSED→SHADOW→APPROVED→ACTIVE
+    ai.py           Local AI fallback (ONNX + heuristic reference)
+    agent.py        Pattern mining, rule proposal, shadow evaluation
+    pipeline.py     The four stages wired together
+src/cmdm/resolve/
+    blocking.py     Candidate generation from the ingest-time keys
+    scoring.py      Vectorized comparators, tri-zone split, vetoes
+    crossencoder.py Grey-zone classifier (ONNX + feature reference)
+    clustering.py   SciPy connected components → master ids
+    pipeline.py     Resolution run, persisted with its thresholds
 src/cmdm/mappings/
     life_admin.toml Example source mapping
 src/cmdm/sql/
-    001_golden_schema.sql   Generated. Do not edit.
+    001_golden_schema.sql   Generated from the registry. Do not edit.
+    002_pipeline.sql        Queue, batches, rules, match ledger
+    003_standardization.sql Rule kinds and extraction targets
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
