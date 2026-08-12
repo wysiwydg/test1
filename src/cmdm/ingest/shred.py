@@ -35,13 +35,35 @@ __all__ = [
     "shred_relationships",
     "shred",
     "POLICY_SCOPED_COLUMNS",
+    "PASSTHROUGH_COLUMNS",
 ]
+
+#: Columns carried straight through from the raw frame when present, without
+#: being declared in a mapping. Only ``source_record_id``, and it is here
+#: because survivorship needs to name the record a winning value came from --
+#: both for the lineage the console shows and for the deterministic tie-break.
+#: Without it a tie falls back to row order, and Polars group-by is threaded, so
+#: two runs over identical input can disagree about which of two equally-good
+#: values wins. A customer's name changing overnight for no reason is exactly
+#: the kind of unexplainable churn an MDM system exists to prevent.
+PASSTHROUGH_COLUMNS = ("source_record_id",)
 
 #: Columns that describe a party's attachment to one policy rather than the
 #: party itself. They belong on the Relationship edge; carrying them on a
 #: collapsed Person row would assert something untrue, since a party holds
 #: different roles on different policies.
 POLICY_SCOPED_COLUMNS = ("role", "role_sequence", "policy_number_normalized")
+
+
+def _passthrough(raw: pl.LazyFrame) -> list[pl.Expr]:
+    """Reserved columns to carry through, if the caller supplied them.
+
+    Optional rather than required: the shredder is used directly on a CSV in
+    tests and in the README, where there is no landing zone and therefore no
+    record id to carry.
+    """
+    available = set(raw.collect_schema().names())
+    return [pl.col(c) for c in PASSTHROUGH_COLUMNS if c in available]
 
 
 def _apply_transform(fm: FieldMapping, mapping: SourceMapping) -> pl.Expr:
@@ -105,6 +127,7 @@ def shred_policies(raw: pl.LazyFrame, mapping: SourceMapping) -> pl.LazyFrame:
     exprs = [_apply_transform(fm, mapping) for fm in mapping.policy]
     frame = raw.select(
         *exprs,
+        *_passthrough(raw),
         pl.lit(mapping.source_system).alias("source_system"),
     )
 
@@ -131,6 +154,7 @@ def _party_frame(
 
     frame = raw.select(
         *exprs,
+        *_passthrough(raw),
         pl.col(party.key_field).cast(pl.String, strict=False).str.strip_chars()
         .alias("source_party_key"),
         pl.lit(party.key_kind).alias("source_key_kind"),
@@ -303,9 +327,20 @@ def collapse_parties(parties: pl.LazyFrame) -> pl.LazyFrame:
     schema = parties.collect_schema().names()
     value_cols = [c for c in schema if c not in keys]
 
+    # Completeness first, then the record id as a tie-break. Two occurrences
+    # carrying the same number of matchable attributes are equally good by the
+    # rule above, and "first" among them would otherwise mean whichever row the
+    # threaded group-by happened to see first — so the same file collapses two
+    # ways on two runs and the golden record churns for no stated reason.
+    order = ["_completeness"]
+    descending = [True]
+    if PASSTHROUGH_COLUMNS[0] in schema:
+        order.append(PASSTHROUGH_COLUMNS[0])
+        descending.append(False)
+
     collapsed = (
         identified.with_columns(completeness.alias("_completeness"))
-        .sort("_completeness", descending=True)
+        .sort(order, descending=descending)
         .group_by(keys)
         .agg([pl.col(c).drop_nulls().first().alias(c) for c in value_cols])
         .select(schema)

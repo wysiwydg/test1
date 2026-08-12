@@ -452,3 +452,87 @@ def test_pipeline_can_run_without_writing(conn) -> None:
     })
     result = run_pipeline(conn, empty, mapping, write=False)
     assert result.writes == {}
+
+
+# ---------------------------------------------------------------------------
+# Determinism and derived consistency
+# ---------------------------------------------------------------------------
+
+
+def test_a_shared_source_record_still_breaks_ties_deterministically() -> None:
+    """One policy row yields an owner, an insured and an agent.
+
+    They share a source_record_id by construction, so that column alone cannot
+    order them, and the tie used to fall through to row order — which Polars
+    does not promise across a threaded group-by.
+    """
+    rows = [
+        {"source_record_id": "shared", "source_party_key": "P1",
+         "source_key_kind": "OWNER", "full_name": "JOHN SMITH",
+         "occupation": "Nurse"},
+        {"source_record_id": "shared", "source_party_key": "P2",
+         "source_key_kind": "INSURED", "full_name": "J SMITH",
+         "occupation": "Driver"},
+    ]
+    seen = {
+        survive(contributors(rows[::step]), PERSON, trust=TRUST)[0]["occupation"][0]
+        for step in (1, -1)
+    }
+    assert len(seen) == 1
+
+
+def test_most_frequent_breaks_a_tied_count_by_trust() -> None:
+    """value_counts() returns the mode but decides a tie by hash order."""
+    frame = contributors([
+        {"source_system": "LOW", "date_of_birth": dt.date(1980, 1, 1)},
+        {"source_system": "HIGH", "date_of_birth": dt.date(1990, 2, 2)},
+    ])
+    golden, _, _ = survive(frame, PERSON, trust=TRUST)
+    assert golden["date_of_birth"][0] == dt.date(1990, 2, 2)
+
+
+def test_most_frequent_still_prefers_the_modal_value_over_trust() -> None:
+    frame = contributors([
+        {"source_system": "HIGH", "date_of_birth": dt.date(1980, 1, 1)},
+        {"source_system": "LOW", "date_of_birth": dt.date(1990, 2, 2)},
+        {"source_system": "LOW", "date_of_birth": dt.date(1990, 2, 2)},
+    ])
+    golden, _, _ = survive(frame, PERSON, trust=TRUST)
+    assert golden["date_of_birth"][0] == dt.date(1990, 2, 2)
+
+
+def test_a_derived_value_comes_from_the_record_that_won_its_parent() -> None:
+    """full_name and full_name_normalized must describe the same person.
+
+    Search, blocking and every comparator read the normalized form. A record
+    that survives with the two taken from different sources is findable only
+    under a name it does not display.
+    """
+    frame = contributors([
+        {"full_name": "JOHN MICHAEL SMITH", "full_name_normalized": "JOHN MICHAEL SMITH",
+         "source_system": "LOW"},
+        {"full_name": "JON SMITH", "full_name_normalized": "JON SMITH",
+         "source_system": "HIGH"},
+    ])
+    golden, _, _ = survive(frame, PERSON, trust=TRUST)
+    # full_name is MOST_COMPLETE, so the longer one wins; the derived form must
+    # follow it rather than following trust on its own.
+    assert golden["full_name"][0] == "JOHN MICHAEL SMITH"
+    assert golden["full_name_normalized"][0] == "JOHN MICHAEL SMITH"
+
+
+def test_a_derived_value_is_null_when_its_parent_did_not_survive() -> None:
+    frame = contributors([
+        {"full_name": None, "full_name_normalized": "ORPHANED"},
+    ])
+    golden, _, _ = survive(frame, PERSON, trust=TRUST)
+    assert golden["full_name_normalized"][0] is None
+
+
+def test_a_derived_value_ranks_alone_when_its_parent_is_absent() -> None:
+    """A frame carrying the derived column but not its parent still survives."""
+    frame = contributors([
+        {"full_name_normalized": "ONLY", "source_system": "HIGH"},
+    ]).drop("full_name", strict=False)
+    golden, _, _ = survive(frame, PERSON, trust=TRUST)
+    assert golden["full_name_normalized"][0] == "ONLY"

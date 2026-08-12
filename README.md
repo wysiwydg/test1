@@ -14,6 +14,8 @@ and probabilistic passes abstain.
 > normalization kernels, shredding, measured throughput.
 > [`docs/03-architecture.md`](docs/03-architecture.md) — the layering, runtime path,
 > where AI enters, code and storage maps.
+> [`docs/04-operating-the-consoles.md`](docs/04-operating-the-consoles.md) — how to
+> run it: ingestion, stewardship and the business view, with the setup each needs.
 
 ### Measured, not asserted
 
@@ -24,7 +26,8 @@ and probabilistic passes abstain.
 | Blocking | 1,553× pair reduction, 99.2% blocking recall |
 | Resolution | precision **0.991**, recall **0.780** vs generator ground truth |
 | Grey-zone model | contributes **46% of all true positives at 100% precision** |
-| Full pipeline | 5,000 policies → 2,712 golden persons in **1.7 s**, one transaction |
+| Full pipeline | 5,000 policies → 2,711 golden persons in **3.2 s**, one transaction |
+| Re-processing | runs 2 and 3 write **0 changes**, 2,711 unchanged |
 | Duplicate check | **21 ms** mean, same engine as the batch run |
 | Work queue | 6 workers, 300 jobs, **zero overlapping claims** |
 
@@ -122,10 +125,11 @@ src/cmdm/api/
     deps.py         Shared connection and authentication dependencies
     app.py          Read/search, submit, real-time duplicate check, /metrics
 src/cmdm/ui/
-    console.py      Business and steward consoles, server-rendered
+    console.py      Ingestion, steward and business consoles, server-rendered
 src/cmdm/observe/
     metrics.py      Operational, match-quality and data-quality metrics
 src/cmdm/pipeline.py    End-to-end orchestration
+src/cmdm/worker.py      Queue drainer, batch processor, rule miner (CLI)
 src/cmdm/mappings/
     life_admin.toml Example source mapping
 src/cmdm/sql/
@@ -134,9 +138,14 @@ src/cmdm/sql/
     003_standardization.sql Rule kinds and extraction targets
     004_provenance_nullable.sql
     005_governance.sql      Principals, consent, erasure, audit
+    006_match_pair_identity.sql  The ledger keys on what was compared
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
+    03-architecture.md
+    04-operating-the-consoles.md
+scripts/
+    bootstrap.py            Migrations + one API key per console audience
 ```
 
 ## Getting started
@@ -145,7 +154,7 @@ docs/
 pip install -e ".[dev,vector]"
 python -m scripts.render_ddl                       # regenerate the DDL from the registry
 python -m scripts.generate_sample_data --rows 5000 # synthetic extract with real-world mess
-pytest                                             # 401 tests
+pytest                                             # 428 tests
 ```
 
 Running the API and consoles:
@@ -153,14 +162,22 @@ Running the API and consoles:
 ```bash
 export CMDM_DSN="host=/tmp port=5432 user=postgres dbname=cmdm"
 export CMDM_ID_HASH_KEY="…"
-uvicorn cmdm.api.app:app --port 8000
+
+python -m scripts.bootstrap             # migrate, and print one key per audience
+uvicorn cmdm.api.app:app --port 8000    # API + all three consoles
+python -m cmdm.worker serve             # drains the ingest queue
 ```
 
+- `/console/login` — paste a key; it becomes an HttpOnly session cookie
+- `/console/ingest` — submit a batch, watch it land, process the queue
 - `/console` — business console: search, golden record, lineage
-- `/console/steward` — grey-zone review queue and learned-rule approvals
+- `/console/steward` — grey-zone review queue
+- `/console/rules` — learned-rule approvals (`python -m cmdm.worker mine` fills it)
 - `/console/quality` — completeness and conformity
 - `/docs` — OpenAPI
 - `/metrics` — Prometheus
+
+Full walkthrough: [`docs/04-operating-the-consoles.md`](docs/04-operating-the-consoles.md).
 
 Shredding a sample extract:
 
@@ -223,6 +240,20 @@ export CMDM_ID_HASH_KEY="…"   # never stored in the database
   A required column is tombstoned rather than skipped.
 - **The console is server-rendered**, so a VIEWER's browser never receives the
   PII it is not allowed to see.
+- **Golden ids come from the crosswalk, not from a fresh mint.** Re-processing a
+  batch is meant to be routine — a steward decision only takes effect on the next
+  run — so it has to be a no-op. Person has no natural-key index by design, so
+  nothing in the database would have refused a second set of ids.
+- **Every tie is broken deterministically, on a key that is actually unique.**
+  One policy row yields an owner, an insured and an agent, so `source_record_id`
+  alone ties; the identity triple does not. Without that, a threaded group-by
+  picked a different winner each run and customers' names changed overnight.
+- **A derived value comes from the record that won its parent.** `full_name` and
+  `full_name_normalized` picked their winners independently, so 290 of 2,712
+  records were searchable only under a name they did not display.
+- **A steward's verdict is an input to the next run**, recorded as a fixed edge
+  rather than applied to the store. The book does not change under whoever is
+  reading it, and the review is spent once.
 
 ## License
 

@@ -138,6 +138,12 @@ class SourceMapping:
     source_system: str
     policy: Sequence[FieldMapping]
     parties: Sequence[PartyMapping]
+    #: Which mapping this is, as opposed to which system it reads. Recorded on
+    #: every accepted batch so a worker holding only a batch id can load the
+    #: same mapping again. Distinct from ``source_system`` because one system
+    #: legitimately has several feeds -- a nightly full extract and an hourly
+    #: delta are one system and two mappings.
+    name: str = ""
     #: Date formats to try, in order. Per-source rather than global, because
     #: day-first and month-first are mutually ambiguous and no amount of
     #: inspecting the values resolves it reliably — the source owner knows.
@@ -292,6 +298,7 @@ def parse_mapping(document: Mapping[str, Any]) -> SourceMapping:
 
     return SourceMapping(
         source_system=source_system,
+        name=str(document.get("name") or source_system),
         policy=policy_fields,
         parties=tuple(parties),
         date_formats=tuple(document.get("date_formats", ("%Y-%m-%d", "%d/%m/%Y", "%Y%m%d"))),
@@ -301,10 +308,16 @@ def parse_mapping(document: Mapping[str, Any]) -> SourceMapping:
 
 
 def load_mapping(path: str | Path) -> SourceMapping:
-    """Read and validate a mapping file."""
+    """Read and validate a mapping file.
+
+    The filename is the mapping's name unless the document sets one. It is what
+    the API takes as ``mapping_name`` and what a batch records, so the two are
+    the same string by construction rather than by convention.
+    """
     p = Path(path)
     with p.open("rb") as fh:
         document = tomllib.load(fh)
+    document.setdefault("name", p.stem)
     try:
         return parse_mapping(document)
     except ValueError as exc:

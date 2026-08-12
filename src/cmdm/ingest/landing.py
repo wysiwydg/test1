@@ -418,8 +418,13 @@ def accept_batch(
             RETURNING batch_id
             """,
             (
-                batch_id, mapping.source_system, mapping.source_system, origin,
-                filename, content_hash, state, raw.height,
+                batch_id, mapping.source_system,
+                # Which mapping, not which system. A worker reloads the batch
+                # from this name; storing the source system here made every
+                # batch claim to have been read by a mapping file that does not
+                # exist, so nothing could reprocess one.
+                mapping.name or mapping.source_system,
+                origin, filename, content_hash, state, raw.height,
                 Jsonb(report.as_dict()), submitted_by,
             ),
         )

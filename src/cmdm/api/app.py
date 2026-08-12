@@ -26,12 +26,13 @@ import datetime as dt
 import io
 import uuid
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import polars as pl
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi import File as FileParam
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,7 @@ from cmdm.deps import (
 )
 from cmdm.governance.rbac import Action, log_access, mask_frame
 from cmdm.model.fields import PERSON
+from cmdm.ui.console import LoginRequired
 from cmdm.ui.console import router as console_router
 
 __all__ = ["create_app", "app"]
@@ -467,6 +469,18 @@ def create_app() -> FastAPI:
         return Response(
             content=render_prometheus(conn),
             media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    @api.exception_handler(LoginRequired)
+    def _console_login(request: Request, exc: LoginRequired) -> Response:
+        """Send an unauthenticated browser to the sign-in page.
+
+        Registered on the application rather than handled per route: a console
+        page that forgot would 403 with a JSON body, which a person cannot act
+        on and would read as the system being broken.
+        """
+        return RedirectResponse(
+            f"/console/login?next={quote(request.url.path)}", status_code=303
         )
 
     api.include_router(console_router)

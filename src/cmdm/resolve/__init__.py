@@ -16,7 +16,13 @@ from cmdm.resolve.crossencoder import (
     PairDecision,
     classify_grey_zone,
 )
-from cmdm.resolve.pipeline import ResolutionReport, persist_run, resolve
+from cmdm.resolve.pipeline import (
+    STEWARD,
+    ResolutionReport,
+    load_steward_decisions,
+    persist_run,
+    resolve,
+)
 from cmdm.resolve.scoring import (
     AUTO_MATCH_THRESHOLD,
     AUTO_REJECT_THRESHOLD,
@@ -36,5 +42,6 @@ __all__ = [
     "CrossEncoder", "FeatureCrossEncoder", "OnnxCrossEncoder", "PairDecision",
     "classify_grey_zone", "AI_ACCEPT_THRESHOLD", "NICKNAMES",
     "cluster_pairs", "ClusterResult", "SUSPICIOUS_CLUSTER_SIZE",
-    "resolve", "ResolutionReport", "persist_run",
+    "resolve", "ResolutionReport", "persist_run", "load_steward_decisions",
+    "STEWARD",
 ]

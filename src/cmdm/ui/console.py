@@ -28,15 +28,17 @@ queue and answers "what needs a decision from me".
 from __future__ import annotations
 
 import html
+import io
 import uuid
 from typing import Annotated, Any
 
 import polars as pl
-from fastapi import APIRouter, Form, HTTPException, Query
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
+from fastapi import File as FileParam
 from fastapi.responses import HTMLResponse, RedirectResponse
 from psycopg.rows import dict_row
 
-from cmdm.deps import ConnectionDep, PrincipalDep, require
+from cmdm.deps import SESSION_COOKIE, ConnectionDep, PrincipalDep, require
 from cmdm.governance.rbac import (
     Action,
     Principal,
@@ -124,20 +126,34 @@ def _page(title: str, principal: Principal, body: str, *, active: str = "") -> H
         weight = ' style="font-weight:650"' if key == active else ""
         return f'<a href="{href}"{weight}>{label}</a>'
 
-    nav = [link("/console", "Customers", "business")]
+    nav = []
+    if principal.may(Action.SEARCH):
+        nav.append(link("/console", "Customers", "business"))
+    if principal.may(Action.SUBMIT):
+        nav.append(link("/console/ingest", "Ingestion", "ingest"))
     if principal.may(Action.MERGE):
         nav.append(link("/console/steward", "Steward queue", "steward"))
     if principal.may(Action.APPROVE_RULE):
         nav.append(link("/console/rules", "Learned rules", "rules"))
-    nav.append(link("/console/quality", "Quality", "quality"))
+    if principal.may(Action.SEARCH):
+        nav.append(link("/console/quality", "Quality", "quality"))
 
-    roles = ", ".join(principal.roles) or "unauthenticated"
+    if principal.roles:
+        who = (
+            f"{_esc(principal.subject)} · {_esc(', '.join(principal.roles))} "
+            '<form method="post" action="/console/logout" style="display:inline">'
+            '<button class="secondary" style="padding:2px 8px;font-size:12px">'
+            "Sign out</button></form>"
+        )
+    else:
+        who = '<a href="/console/login">Sign in</a>'
+
     return HTMLResponse(
         f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Customer MDM</title><style>{STYLE}</style></head>
 <body><header><h1>Customer MDM</h1><nav>{"".join(nav)}</nav>
-<span class="who">{_esc(principal.subject)} · {_esc(roles)}</span></header>
+<span class="who">{who}</span></header>
 <main>{body}</main></body></html>"""
     )
 
@@ -157,7 +173,89 @@ def _bar(ratio: float) -> str:
 #: this caller" is decided.
 router = APIRouter(prefix="/console", tags=["console"])
 
-_guard = require
+
+class LoginRequired(Exception):
+    """Raised when an unauthenticated browser reaches a console page.
+
+    A 403 with a JSON body is the right answer for an API client and the wrong
+    one for a person: they have no way to supply a key from it. The application
+    turns this into a redirect to the sign-in page instead. Anyone who *is*
+    signed in and simply lacks the permission still gets the 403 — being told to
+    sign in again when you are already signed in teaches people to distrust the
+    message.
+    """
+
+
+def _guard(principal: Principal, action: str, conn: Any) -> None:
+    """Authorize a console request, or send the caller to sign in."""
+    if not principal.roles:
+        raise LoginRequired
+    require(principal, action, conn)
+
+
+@router.get("/login", response_class=HTMLResponse)
+def login_form(
+    principal: PrincipalDep,
+    next: Annotated[str, Query(max_length=200)] = "/console",
+) -> HTMLResponse:
+    """Exchange an API key for a session cookie."""
+    target = next if next.startswith("/console") else "/console"
+    body = (
+        "<h2>Sign in</h2>"
+        '<p class="note">Paste the API key issued for your role. '
+        "<code>python -m scripts.bootstrap</code> prints one per console "
+        "audience, once.</p>"
+        '<form class="search" method="post" action="/console/login">'
+        f'<input type="hidden" name="next" value="{_esc(target)}">'
+        '<input type="password" name="key" placeholder="API key" size="44" '
+        "required autofocus><button>Sign in</button></form>"
+    )
+    if principal.roles:
+        body += (
+            f'<p class="note">You are already signed in as '
+            f"{_esc(principal.subject)}.</p>"
+        )
+    return _page("Sign in", principal, body)
+
+
+@router.post("/login")
+def login(
+    conn: ConnectionDep,
+    key: Annotated[str, Form(max_length=500)],
+    next: Annotated[str, Form(max_length=200)] = "/console",
+) -> RedirectResponse:
+    """Validate the key before storing it.
+
+    Checked here rather than left for the next request so a mistyped key fails
+    at the sign-in page, where the person can see it, instead of turning every
+    subsequent page into an unexplained redirect back here.
+
+    Open redirects are the standard bug in this shape of handler, so ``next`` is
+    required to be a console path rather than merely a relative one.
+    """
+    from cmdm.governance.rbac import authenticate
+
+    principal = authenticate(conn, key)
+    if not principal.roles:
+        return RedirectResponse("/console/login?next=/console", status_code=303)
+
+    log_access(conn, principal, Action.READ, entity_name="ConsoleSession")
+    response = RedirectResponse(
+        next if next.startswith("/console") else "/console", status_code=303
+    )
+    response.set_cookie(
+        SESSION_COOKIE, key,
+        httponly=True, samesite="lax", max_age=12 * 3600, path="/",
+    )
+    return response
+
+
+@router.post("/logout")
+def logout() -> RedirectResponse:
+    """Drop the session cookie."""
+    response = RedirectResponse("/console/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +457,228 @@ def person_detail(
 
     return _page("Customer", principal, "".join(body), active="business")
 
+# ---------------------------------------------------------------------------
+# Ingestion console
+# ---------------------------------------------------------------------------
+#
+# The operator's view of the same two steps the API exposes: submit a file, and
+# let a worker process it. It exists because the people who own a feed are not
+# the people who hold an API key, and "did last night's extract load" is a
+# question asked far more often than any other in this system.
+#
+# The page shows the queue rather than hiding it. A batch is accepted, then
+# queued, then processed, and an operator who cannot see that a batch is sitting
+# in the queue will conclude the upload failed and send it again.
+
+
+def _batch_states(conn: Any) -> list[dict[str, Any]]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT b.batch_id, b.source_system, b.mapping_name, b.filename,
+                   b.origin, b.state, b.row_count, b.accepted_count,
+                   b.submitted_by, b.submitted_at, b.completed_at, b.last_error,
+                   b.validation_report,
+                   q.state AS job_state, q.attempts, q.last_error AS job_error
+            FROM mdm.ingest_batch b
+            LEFT JOIN mdm.work_queue q
+                   ON q.dedupe_key = 'batch:' || b.batch_id::text
+            ORDER BY b.submitted_at DESC
+            LIMIT 25
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _available_mappings() -> list[str]:
+    from cmdm.worker import MAPPINGS_DIR
+
+    return sorted(p.stem for p in MAPPINGS_DIR.glob("*.toml"))
+
+
+@router.get("/ingest", response_class=HTMLResponse)
+def ingest(
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+    message: Annotated[str, Query(max_length=2000)] = "",
+) -> HTMLResponse:
+    """Submit a file, and see what happened to the ones already submitted."""
+    _guard(principal, Action.SUBMIT, conn)
+
+    from cmdm.db.queue import QUEUE_STANDARDIZE, WorkQueue
+
+    depth = WorkQueue(conn).depth(QUEUE_STANDARDIZE)
+    pending = depth.get("PENDING", 0) + depth.get("FAILED", 0)
+    batches = _batch_states(conn)
+    mappings = _available_mappings()
+
+    options = "".join(f"<option>{_esc(m)}</option>" for m in mappings)
+    body = []
+    if message:
+        body.append(f'<p class="note">{_esc(message)}</p>')
+
+    body.append(
+        "<h2>Submit a batch</h2>"
+        '<p class="note">A CSV in the shape the chosen mapping expects. It is '
+        "validated as you submit it — you find out which columns are wrong now, "
+        "not tomorrow — then landed and queued. Nothing is written to the "
+        "customer book until a worker processes it.</p>"
+        '<form class="search" method="post" action="/console/ingest/upload" '
+        'enctype="multipart/form-data">'
+        f'<select name="mapping_name">{options}</select>'
+        '<input type="file" name="file" accept=".csv,text/csv" required>'
+        "<button>Submit</button></form>"
+    )
+
+    body.append(
+        f"<h2>Queue</h2><div class=\"metric\"><span class=\"v\">{pending}</span>"
+        '<span class="k">Waiting to be processed</span></div>'
+        f'<div class="metric"><span class="v">{depth.get("RUNNING", 0)}</span>'
+        '<span class="k">In flight</span></div>'
+        f'<div class="metric"><span class="v">{depth.get("DEAD", 0)}</span>'
+        '<span class="k">Dead-lettered</span></div>'
+    )
+    if pending:
+        body.append(
+            '<form method="post" action="/console/ingest/process">'
+            f'<button>Process {pending} queued batch(es) now</button></form>'
+            '<p class="note">This runs the pipeline in the request, which is fine '
+            "for a file of this size and is how you work without a worker daemon. "
+            "In production <code>python -m cmdm.worker serve</code> does this "
+            "continuously and this button is a manual nudge.</p>"
+        )
+    else:
+        body.append('<p class="note">Nothing queued.</p>')
+
+    body.append(
+        "<h2>Recent batches</h2><table><thead><tr><th>Submitted</th><th>File</th>"
+        "<th>Mapping</th><th>Rows</th><th>State</th><th>Job</th><th>Detail</th>"
+        "</tr></thead><tbody>"
+    )
+    if not batches:
+        body.append('<tr><td colspan="7" class="masked">No batches yet.</td></tr>')
+    for batch in batches:
+        report = batch["validation_report"] or {}
+        issues = report.get("issues", [])
+        detail = batch["last_error"] or batch["job_error"] or "; ".join(
+            f"{i['severity']}: {i['message']}" for i in issues[:2]
+        )
+        state_class = {
+            "COMPLETED": "zone-AUTO_MATCH",
+            "REJECTED": "zone-AUTO_REJECT",
+            "FAILED": "zone-AUTO_REJECT",
+        }.get(batch["state"], "zone-GREY")
+        attempts = f" ×{batch['attempts']}" if batch["attempts"] else ""
+        body.append(
+            f'<tr><td>{_esc(str(batch["submitted_at"])[:19])}<br>'
+            f'<small class="masked">{_esc(batch["submitted_by"])}</small></td>'
+            f'<td>{_esc(batch["filename"])}</td>'
+            f'<td>{_esc(batch["mapping_name"])}</td>'
+            f'<td>{_esc(batch["row_count"])}</td>'
+            f'<td class="{state_class}">{_esc(batch["state"])}</td>'
+            f'<td><span class="chip">{_esc(batch["job_state"] or "—")}</span>'
+            f'{attempts}</td>'
+            f'<td><small>{_esc(detail[:180]) if detail else ""}</small></td></tr>'
+        )
+    body.append("</tbody></table>")
+
+    return _page("Ingestion", principal, "".join(body), active="ingest")
+
+
+@router.post("/ingest/upload")
+async def ingest_upload(
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+    mapping_name: Annotated[str, Form(max_length=100)],
+    file: Annotated[UploadFile, FileParam()],
+) -> RedirectResponse:
+    """Accept a file from the browser, through the same path as the API.
+
+    Deliberately the same ``accept_batch`` call the API endpoint makes, not a
+    console-specific variant. A file uploaded by a person and a file posted by a
+    scheduler must be validated identically or the console becomes a way to get
+    data in that the API would have refused.
+    """
+    _guard(principal, Action.SUBMIT, conn)
+
+    from cmdm.ingest.landing import accept_batch
+    from cmdm.ingest.mapping import load_mapping
+    from cmdm.worker import MAPPINGS_DIR
+
+    path = (MAPPINGS_DIR / f"{mapping_name}.toml").resolve()
+    if path.parent != MAPPINGS_DIR or not path.exists():
+        raise HTTPException(status_code=404, detail=f"unknown mapping {mapping_name!r}")
+
+    payload = await file.read()
+    try:
+        raw = pl.read_csv(io.BytesIO(payload), infer_schema_length=0)
+    except Exception as exc:
+        return _redirect_ingest(f"That file could not be read as CSV: {exc}")
+
+    batch_id, report, enqueued = accept_batch(
+        conn, raw, load_mapping(path), origin="CONSOLE",
+        filename=file.filename, submitted_by=principal.subject,
+    )
+    log_access(conn, principal, Action.SUBMIT, entity_name="Batch",
+               entity_id=batch_id, record_count=raw.height,
+               detail={"accepted": report.accepted, "enqueued": enqueued})
+
+    if enqueued:
+        note = (
+            f"Accepted {raw.height} rows and queued them. "
+            f"{len(report.warnings)} warning(s)."
+        )
+    elif report.accepted:
+        note = "That exact file was already accepted; nothing was queued again."
+    else:
+        note = "Rejected: " + "; ".join(i.message for i in report.errors)
+    return _redirect_ingest(note)
+
+
+def _redirect_ingest(message: str) -> RedirectResponse:
+    from urllib.parse import quote
+
+    return RedirectResponse(
+        f"/console/ingest?message={quote(message[:1000])}", status_code=303
+    )
+
+
+@router.post("/ingest/process")
+def ingest_process(
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+) -> RedirectResponse:
+    """Run the queued batches now.
+
+    Uses its own connections rather than the request's: each job is its own
+    transaction, and sharing the request transaction across several would make
+    one bad batch roll back the good ones processed before it.
+
+    Bounded rather than unbounded. A console click should return to a page, not
+    hold a request open for however long the backlog happens to be.
+    """
+    _guard(principal, Action.SUBMIT, conn)
+
+    from cmdm.db.engine import connect
+    from cmdm.worker import drain
+
+    outcomes = drain(connect, limit=5)
+    if not outcomes:
+        return _redirect_ingest("Nothing was queued.")
+
+    failed = [o for o in outcomes if not o["ok"]]
+    persons = sum(o.get("golden_persons", 0) for o in outcomes if o["ok"])
+    note = (
+        f"Processed {len(outcomes) - len(failed)} batch(es) into {persons:,} "
+        f"golden persons."
+    )
+    if failed:
+        note += f" {len(failed)} failed: " + "; ".join(
+            str(o["error"])[:200] for o in failed
+        )
+    return _redirect_ingest(note)
+
+
 # -- steward console ---------------------------------------------------
 
 @router.get("/steward", response_class=HTMLResponse)
@@ -374,28 +694,43 @@ def steward_queue(
     """
     _guard(principal, Action.MERGE, conn)
 
+    # Scoped to the newest run. Every run re-scores the same pairs, so without
+    # this the queue grows by the whole grey zone every night and a steward
+    # reviews last week's pairs again alongside today's.
+    #
+    # Two lists, not one sorted list. A decision made now does not take effect
+    # until the batch is processed again, and a steward who cannot see the
+    # verdict they just recorded will reasonably conclude the button did
+    # nothing — which is how the same pair gets decided four times.
+    query = """
+        SELECT p.pair_id, p.left_person_id, p.right_person_id, p.score,
+               p.zone, p.ai_score, p.ai_decision, p.blocking_key,
+               p.final_decision, p.decided_by,
+               p.left_source_identity, p.right_source_identity,
+               l.full_name AS left_name, r.full_name AS right_name,
+               l.date_of_birth AS left_dob, r.date_of_birth AS right_dob
+        FROM mdm.match_pair p
+        JOIN (SELECT run_id FROM mdm.resolution_run
+              ORDER BY started_at DESC LIMIT 1) latest USING (run_id)
+        LEFT JOIN mdm.person l ON l.person_id = p.left_person_id AND l.is_current
+        LEFT JOIN mdm.person r ON r.person_id = p.right_person_id AND r.is_current
+        WHERE p.zone = 'GREY' AND p.decided_by {} 'STEWARD'
+        ORDER BY p.score DESC LIMIT %s
+    """
+
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT p.pair_id, p.left_person_id, p.right_person_id, p.score,
-                   p.zone, p.ai_score, p.ai_decision, p.blocking_key,
-                   l.full_name AS left_name, r.full_name AS right_name,
-                   l.date_of_birth AS left_dob, r.date_of_birth AS right_dob
-            FROM mdm.match_pair p
-            LEFT JOIN mdm.person l ON l.person_id = p.left_person_id AND l.is_current
-            LEFT JOIN mdm.person r ON r.person_id = p.right_person_id AND r.is_current
-            WHERE p.zone = 'GREY'
-            ORDER BY p.score DESC LIMIT 100
-            """
-        )
+        cur.execute(query.format("<>"), (100,))
         pairs = [dict(r) for r in cur.fetchall()]
+
+        cur.execute(query.format("="), (25,))
+        reviewed = [dict(r) for r in cur.fetchall()]
 
         cur.execute(
             "SELECT count(*) AS n FROM mdm.standardization_rule WHERE state = 'SHADOW'"
         )
         pending_rules = int((cur.fetchone() or {}).get("n") or 0)
 
-    body = ["<h2>Ambiguous pairs</h2>"]
+    body = [f"<h2>Ambiguous pairs · {len(pairs)} awaiting you</h2>"]
     if pending_rules:
         body.append(
             f'<p class="note">{pending_rules} learned rule(s) are shadow-tested and '
@@ -407,34 +742,82 @@ def steward_queue(
     else:
         body.append(
             '<p class="note">These are the pairs the scorer declined to decide and '
-            "the model was asked about. Its verdict is advisory; yours is final.</p>"
+            "the model was asked about. Its verdict is advisory; yours is final. "
+            "<strong>Outcome</strong> is what the last run actually did — your "
+            "decision is recorded now and takes effect the next time the batch is "
+            "processed, so a merge you approve does not silently rewrite the "
+            "customer book underneath whoever is reading it.</p>"
         )
         body.append("<table><thead><tr><th>Score</th><th>Model</th><th>Left</th>"
-                    "<th>Right</th><th>Blocked on</th><th></th></tr></thead><tbody>")
+                    "<th>Right</th><th>Outcome</th><th>Blocked on</th><th></th>"
+                    "</tr></thead><tbody>")
         for pair in pairs:
             verdict = pair["ai_decision"] or "—"
             ai_score = "" if pair["ai_score"] is None else f"{pair['ai_score']:.2f}"
-            body.append(
-                f'<tr><td class="zone-GREY">{pair["score"]:.3f}</td>'
-                f'<td><span class="chip">{_esc(verdict)}</span> '
-                f"{ai_score}</td>"
-                f'<td><a href="/console/person/{pair["left_person_id"]}">'
-                f'{_esc(pair["left_name"])}</a><br>'
-                f'<small class="masked">{_esc(pair["left_dob"])}</small></td>'
-                f'<td><a href="/console/person/{pair["right_person_id"]}">'
-                f'{_esc(pair["right_name"])}</a><br>'
-                f'<small class="masked">{_esc(pair["right_dob"])}</small></td>'
-                f'<td><span class="chip">{_esc(pair["blocking_key"])}</span></td>'
-                f'<td><form method="post" action="/console/steward/decide">'
+            merged = pair["left_person_id"] == pair["right_person_id"]
+            outcome = (
+                '<span class="zone-AUTO_MATCH">merged</span>' if merged
+                else '<span class="zone-AUTO_REJECT">kept apart</span>'
+            )
+            action = (
+                f'<form method="post" action="/console/steward/decide">'
                 f'<input type="hidden" name="pair_id" value="{pair["pair_id"]}">'
                 f'<input name="reason" placeholder="Reason" required size="16">'
                 f'<button name="decision" value="MERGE">Merge</button> '
                 f'<button class="secondary" name="decision" value="SEPARATE">'
-                f"Separate</button></form></td></tr>"
+                f"Separate</button></form>"
+            )
+            body.append(
+                f'<tr><td class="zone-GREY">{pair["score"]:.3f}</td>'
+                f'<td><span class="chip">{_esc(verdict)}</span> '
+                f"{ai_score}</td>"
+                f"<td>{_person_cell(pair, 'left')}</td>"
+                f"<td>{_person_cell(pair, 'right')}</td>"
+                f"<td>{outcome}</td>"
+                f'<td><span class="chip">{_esc(pair["blocking_key"])}</span></td>'
+                f"<td>{action}</td></tr>"
+            )
+        body.append("</tbody></table>")
+
+    if reviewed:
+        body.append(
+            f"<h2>Decided by a steward · {len(reviewed)}</h2>"
+            '<p class="note">Recorded, and read as a fixed edge the next time '
+            "resolution runs — so the review is spent once rather than every "
+            "night. Re-process the batch from the "
+            '<a href="/console/ingest">ingestion console</a> to apply them.</p>'
+            "<table><thead><tr><th>Score</th><th>Left</th><th>Right</th>"
+            "<th>Your call</th></tr></thead><tbody>"
+        )
+        for pair in reviewed:
+            body.append(
+                f'<tr><td class="zone-GREY">{pair["score"]:.3f}</td>'
+                f"<td>{_person_cell(pair, 'left')}</td>"
+                f"<td>{_person_cell(pair, 'right')}</td>"
+                f'<td><span class="chip">you: {_esc(pair["final_decision"])}</span>'
+                "</td></tr>"
             )
         body.append("</tbody></table>")
 
     return _page("Steward queue", principal, "".join(body), active="steward")
+
+def _person_cell(pair: dict[str, Any], side: str) -> str:
+    """One side of a candidate pair.
+
+    Falls back to the source identity when there is no golden record to link to.
+    That happens for every pair the run merged — both sides became one person —
+    and a blank cell there would hide exactly the pairs most worth checking.
+    """
+    person_id = pair[f"{side}_person_id"]
+    name = pair[f"{side}_name"]
+    identity = (pair[f"{side}_source_identity"] or "").replace("\x1f", " · ")
+    label = _esc(name) if name else '<span class="masked">no golden record</span>'
+    linked = f'<a href="/console/person/{person_id}">{label}</a>' if person_id else label
+    return (
+        f"{linked}<br><small class=\"masked\">{_esc(pair[f'{side}_dob'])} · "
+        f"{_esc(identity)}</small>"
+    )
+
 
 @router.post("/steward/decide")
 def steward_decide(
@@ -451,14 +834,22 @@ def steward_decide(
     fixed edges — so a steward's call survives the next run rather than
     being overwritten by it, which is what happens when a console mutates
     the golden store directly.
+
+    ``decided_by`` records *how*, not *who*: the next run finds the overrides by
+    querying for the literal ``STEWARD``, and it cannot do that if the column
+    holds a different username for every reviewer. Who decided, and the reason
+    they gave, are in ``steward_action``.
     """
     _guard(principal, Action.MERGE, conn)
     if decision not in ("MERGE", "SEPARATE"):
         raise HTTPException(status_code=400, detail="decision must be MERGE or SEPARATE")
 
+    from cmdm.resolve import STEWARD
+
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT left_person_id, right_person_id, score, zone, ai_decision "
+            "SELECT left_person_id, right_person_id, left_source_identity, "
+            "right_source_identity, score, zone, ai_decision "
             "FROM mdm.match_pair WHERE pair_id = %s",
             (pair_id,),
         )
@@ -469,17 +860,19 @@ def steward_decide(
     record_steward_action(
         conn, principal,
         Action.MERGE if decision == "MERGE" else Action.SPLIT,
-        entity_name="MatchPair", entity_id=pair["left_person_id"],
-        related_id=pair["right_person_id"], reason=reason,
+        entity_name="MatchPair", entity_id=pair_id,
+        related_id=pair["left_person_id"], reason=reason,
         before={"zone": pair["zone"], "score": float(pair["score"]),
-                "ai_decision": pair["ai_decision"]},
+                "ai_decision": pair["ai_decision"],
+                "left": pair["left_source_identity"],
+                "right": pair["right_source_identity"]},
         after={"decision": decision},
     )
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE mdm.match_pair SET final_decision = %s, decided_by = %s "
             "WHERE pair_id = %s",
-            ("MATCH" if decision == "MERGE" else "NO_MATCH", principal.subject, pair_id),
+            ("MATCH" if decision == "MERGE" else "NO_MATCH", STEWARD, pair_id),
         )
     return RedirectResponse("/console/steward", status_code=303)
 
@@ -516,7 +909,12 @@ def rules(
             "patterns in the AI fallback log. A rule cannot go live until it has "
             "been shadow-tested and approved here.</p>"]
     if not found:
-        body.append('<p class="note">No rules proposed yet.</p>')
+        body.append(
+            '<p class="note">No rules proposed yet. The miner reads the AI '
+            "fallback log offline rather than on the ingest path — run "
+            "<code>python -m cmdm.worker mine</code> after a batch has been "
+            "processed, and anything it finds appears here for approval.</p>"
+        )
     else:
         body.append("<table><thead><tr><th>Rule</th><th>State</th><th>Pattern</th>"
                     "<th>Fixes</th><th>Regressions</th><th>Evidence</th><th></th>"

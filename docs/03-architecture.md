@@ -6,9 +6,9 @@ PostgreSQL 16 instance on the 5,000-policy synthetic extract; reproduce with
 
 | | |
 |---|---|
-| 43 Python modules | 12,182 lines |
-| 5 migrations | 1,774 lines SQL, 21 tables |
-| 401 tests | 4,004 lines, real Postgres |
+| 44 Python modules | 13,594 lines |
+| 6 migrations | 1,843 lines SQL, 21 tables |
+| 428 tests | 4,540 lines, real Postgres |
 
 ---
 
@@ -21,10 +21,11 @@ walking the import graph, not by convention.
 flowchart TD
     subgraph EDGE[" "]
         api["api/<br><small>7 endpoints</small>"]
-        ui["ui/<br><small>7 console routes</small>"]
+        ui["ui/<br><small>13 console routes</small>"]
     end
     subgraph ORCH[" "]
         pipe["pipeline.py<br><small>composes the stages, owns no logic</small>"]
+        wrk["worker.py<br><small>claims jobs, mines rules</small>"]
     end
     subgraph ENGINES[" "]
         ing["ingest/"]
@@ -42,7 +43,8 @@ flowchart TD
     reg["model/ — the field registry<br><small>type · survivorship · match role · PII class</small>"]
 
     api --> pipe
-    ui --> pipe
+    ui --> wrk
+    wrk --> pipe
     api --> dep
     ui --> dep
     api --> gov
@@ -155,11 +157,11 @@ groups exist so the other two can be explained.
 | **Canonical entities** | `policy` `person` `relationship` | The golden records. SCD-2, one current version per identity enforced by a partial unique index. |
 | **Identity anchors** | `policy_master` `person_master` | Versioned tables can't back a foreign key — the surrogate repeats per version — so every FK targets these. Also where a merged-away id keeps existing. |
 | **Evidence** | `source_record` `person_xref` `policy_xref` `attribute_provenance` | Where every golden value came from. The crosswalk is where identity actually lives. |
-| **Decisions** | `match_pair` `resolution_run` `match_audit` `standardization_exception` `standardization_rule` | Every resolution decision *including rejections*, every AI invocation, every learned rule with its shadow results. |
+| **Decisions** | `match_pair` `resolution_run` `match_audit` `standardization_exception` `standardization_rule` | Every resolution decision *including rejections*, every AI invocation, every learned rule with its shadow results. `match_pair` is keyed on the *source identities* compared, not on golden ids: resolution runs before golden ids exist, and an auto-match collapses both sides into one. |
 | **Pipeline** | `work_queue` `ingest_batch` | The queue, in the same database so accept-and-enqueue is one commit. |
 | **Governance** | `principal` `access_log` `steward_action` `consent` `erasure_request` | `access_log` refuses UPDATE and DELETE at the database. |
 
-`001_golden_schema.sql` is generated from the registry and drift-tested. `002`–`005`
+`001_golden_schema.sql` is generated from the registry and drift-tested. `002`–`006`
 are hand-written operational machinery — putting queue plumbing into the registry
 that describes what a Person *is* would be a category error.
 
@@ -170,13 +172,12 @@ that describes what a Person *is* would be a category error.
 | Process | Serves | Scaling |
 |---|---|---|
 | `uvicorn cmdm.api.app:app` | REST API, both consoles, `/metrics` | Horizontal. Stateless; one pooled connection and one transaction per request. |
-| pipeline worker | Claims from `work_queue`, runs stages 02–06 | Horizontal. SKIP LOCKED gives disjoint claims; leases return a crashed worker's jobs. |
-| rule miner | Mines the exception log, proposes and shadow-tests rules | Scheduled, single instance. Proposes only — a steward approves. |
+| `python -m cmdm.worker serve` | Claims from `work_queue`, runs stages 02–06 | Horizontal. SKIP LOCKED gives disjoint claims; leases return a crashed worker's jobs. Each job is its own connection and transaction, so a bad batch cannot roll back the ones already finished. |
+| `python -m cmdm.worker mine` | Mines the exception log, proposes and shadow-tests rules | Scheduled, single instance. Proposes only — a steward approves. Offline rather than on the ingest path: it reads the whole exception corpus, so per-batch mining would repeat one global scan per file. |
 
-**Not yet built:** the worker daemon. Batches land and enqueue correctly and the
-queue is proven under concurrency, but nothing drains it on a loop —
-`run_pipeline()` is currently called directly. That is a supervisor loop around
-`WorkQueue.claim`, not a design gap.
+The ingestion console can also drain the queue in-request, bounded to a few
+jobs. That is a manual nudge for a deployment with no worker running, not a
+second code path — it calls the same `drain()`.
 
 ---
 
@@ -195,3 +196,28 @@ queue is proven under concurrency, but nothing drains it on a loop —
   0.70 trading against 0.991 precision. Blocking recall is 99.2%, so the ceiling
   is not the constraint — the threshold is, and it should be set against real data
   and a real tolerance for false merges.
+
+---
+
+## 7. What re-running has to preserve
+
+A steward's verdict only takes effect on the next run, and the ingestion console
+puts a "process" button in front of an operator. Both make re-processing routine
+rather than exceptional, and that turns idempotence from a nicety into a
+correctness requirement. Three things had to change for it to hold:
+
+| | Was | Is |
+|---|---|---|
+| **Golden ids** | minted fresh per run | read from the crosswalk, minted only for clusters it has never seen |
+| **Tie-breaks** | `source_record_id` | the identity triple — one policy row yields an owner, an insured *and* an agent, so the record id alone ties |
+| **Derived values** | ranked independently of their parent | taken from the record that won `derived_from` |
+
+The second and third were not merely non-deterministic, they were wrong. Polars
+group-by is threaded, so a tie fell through to whatever row order the run
+happened to produce: a customer's name changed overnight with no source change
+behind it. And `full_name` and `full_name_normalized` picking separately left
+290 of 2,712 records findable only under a name their own record did not show —
+search, blocking and every comparator read the normalized form.
+
+Measured on the reference batch: runs two and three write `changed=0,
+unchanged=2,711`, and 0 of 2,711 derived values disagree with their parent.

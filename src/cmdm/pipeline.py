@@ -35,9 +35,17 @@ from cmdm.ingest.mapping import SourceMapping
 from cmdm.ingest.shred import shred
 from cmdm.model.fields import PERSON, POLICY
 from cmdm.model.ids import uuid7
-from cmdm.resolve import ResolutionReport, resolve
+from cmdm.resolve import (
+    AUTO_MATCH_THRESHOLD,
+    AUTO_REJECT_THRESHOLD,
+    ResolutionReport,
+    load_steward_decisions,
+    persist_run,
+    resolve,
+)
 from cmdm.standardize import StandardizationReport, standardize
 from cmdm.store import upsert_xref, write_entities
+from cmdm.store.writer import resolve_person_id
 from cmdm.survive import SourceTrust, SurvivorshipReport, survive
 
 __all__ = ["PipelineResult", "run_pipeline", "SOURCE_IDENTITY_COLUMN"]
@@ -97,6 +105,131 @@ def _source_identity(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _golden_person_ids(
+    conn: psycopg.Connection, assignments: pl.DataFrame
+) -> pl.DataFrame:
+    """Attach the golden person id each cluster resolves to.
+
+    Reading the crosswalk here is what makes a run repeatable. Minting a fresh
+    uuid per cluster on every pass is correct exactly once; the second run gives
+    the same party a second golden id, and because Person deliberately has no
+    natural-key unique index — its identity lives in the crosswalk, not in a
+    column — nothing in the database refuses it. The book silently doubles.
+
+    Three cases, and the third is the interesting one:
+
+    *   No member is known: mint. A genuinely new party.
+    *   Every member points at one id: reuse it. The common case, and the one
+        that makes re-processing a no-op.
+    *   Members point at several: two identities the store held apart have been
+        merged by this run. The oldest survives — uuid7 is time-ordered, so
+        ``min`` is "the one published longest" — and the others are retired
+        behind merge pointers rather than deleted, because their ids are already
+        in downstream systems and must keep resolving.
+    """
+    identities = assignments[SOURCE_IDENTITY_COLUMN].to_list()
+
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS _identity_probe")
+        cur.execute(
+            "CREATE TEMP TABLE _identity_probe (identity text) ON COMMIT DROP"
+        )
+        with cur.copy("COPY _identity_probe (identity) FROM STDIN") as copy:
+            for identity in identities:
+                copy.write_row((identity,))
+
+        # The identity is the crosswalk triple joined by a unit separator, so it
+        # is split back apart in SQL rather than carrying three columns through
+        # blocking, scoring and clustering to arrive here.
+        cur.execute(
+            """
+            SELECT p.identity, x.person_id
+            FROM _identity_probe p
+            JOIN mdm.person_xref x
+              ON x.source_system    = split_part(p.identity, chr(31), 1)
+             AND x.source_key_kind  = split_part(p.identity, chr(31), 2)
+             AND x.source_party_key = split_part(p.identity, chr(31), 3)
+            WHERE x.is_active
+            """
+        )
+        known = dict(cur.fetchall())
+
+    if known:
+        # A crosswalk row may point at an id that has since lost a merge.
+        known = {
+            identity: str(resolve_person_id(conn, person_id))
+            for identity, person_id in known.items()
+        }
+
+    survivors: dict[str, str] = {}
+    retired: list[tuple[str, str]] = []
+    for master_id, group in (
+        assignments.group_by("master_id").agg(pl.col(SOURCE_IDENTITY_COLUMN))
+    ).iter_rows():
+        found = sorted({known[i] for i in group if i in known})
+        survivor = found[0] if found else str(uuid7())
+        survivors[master_id] = survivor
+        retired.extend((loser, survivor) for loser in found[1:])
+
+    if retired:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "UPDATE mdm.person_master SET merged_into_id = %s, is_active = false "
+                "WHERE person_id = %s AND merged_into_id IS NULL",
+                [(survivor, loser) for loser, survivor in retired],
+            )
+
+    return assignments.with_columns(
+        pl.col("master_id").replace_strict(survivors).alias("person_id")
+    )
+
+
+def _golden_policy_ids(
+    conn: psycopg.Connection, policies: pl.DataFrame
+) -> pl.DataFrame:
+    """Attach the golden policy id, reusing the one already issued.
+
+    Policy identity is deterministic — a policy number within a source system —
+    so unlike Person it is enforced by a unique index on the golden table. That
+    index is what turned re-processing into a hard error rather than a silent
+    duplicate, which is the better of the two failures but still a failure: a
+    re-run must be an SCD-2 no-op, not a constraint violation.
+    """
+    keys = policies.select("source_system", "policy_number_normalized")
+
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS _policy_probe")
+        cur.execute(
+            "CREATE TEMP TABLE _policy_probe (source_system text, pn text) "
+            "ON COMMIT DROP"
+        )
+        with cur.copy("COPY _policy_probe (source_system, pn) FROM STDIN") as copy:
+            for row in keys.iter_rows():
+                copy.write_row(row)
+
+        cur.execute(
+            """
+            SELECT p.source_system, p.pn, g.policy_id
+            FROM _policy_probe p
+            JOIN mdm.policy g
+              ON g.source_system = p.source_system
+             AND g.policy_number_normalized = p.pn
+            WHERE g.is_current
+            """
+        )
+        known = {(r[0], r[1]): str(r[2]) for r in cur.fetchall()}
+
+    return policies.with_columns(
+        pl.Series(
+            "policy_id",
+            [
+                known.get((system, number)) or str(uuid7())
+                for system, number in keys.iter_rows()
+            ],
+        )
+    )
+
+
 def run_pipeline(
     conn: psycopg.Connection,
     raw: pl.DataFrame,
@@ -128,24 +261,26 @@ def run_pipeline(
     persons, std_report = standardize(persons, conn=conn, batch_id=batch_id)
     result.standardization = std_report
 
-    # -- resolve, on source-scoped identities
+    # -- resolve, on source-scoped identities. Persisted below rather than by
+    #    resolve() itself: the ledger records which golden person each side
+    #    landed in, and that is not known until the clusters have been minted.
     persons = _source_identity(persons)
     clusters, pairs, res_report = resolve(
-        persons, id_column=SOURCE_IDENTITY_COLUMN, conn=None
+        persons,
+        id_column=SOURCE_IDENTITY_COLUMN,
+        conn=None,
+        decisions=load_steward_decisions(conn),
     )
     result.resolution = res_report
 
     # Master id from clustering is one of the source identities; it is stable
-    # and deterministic but is not a golden id. Mint a golden uuid per cluster
-    # so the published identifier carries no source structure -- a downstream
-    # consumer must never be able to infer which system a party came from, and a
-    # cluster that later gains members must not change its published id.
-    cluster_ids = clusters.assignments.select("master_id").unique().sort("master_id")
-    golden = cluster_ids.with_columns(
-        pl.Series("person_id", [str(uuid7()) for _ in range(cluster_ids.height)])
-    )
-    assignments = clusters.assignments.join(golden, on="master_id")
-    result.golden_persons = golden.height
+    # and deterministic but is not a golden id. The published identifier carries
+    # no source structure -- a downstream consumer must never be able to infer
+    # which system a party came from -- and it must survive re-running, so it
+    # comes from the crosswalk where the identity already lives, and is only
+    # minted for a cluster the crosswalk has never seen.
+    assignments = _golden_person_ids(conn, clusters.assignments)
+    result.golden_persons = assignments["person_id"].n_unique()
 
     contributors = persons.join(
         assignments.select(SOURCE_IDENTITY_COLUMN, "person_id"),
@@ -162,6 +297,25 @@ def run_pipeline(
     if not write:
         return result
 
+    # -- the match ledger, including the rejections. Written before the entities
+    #    only because it needs nothing from them; it is the same transaction, so
+    #    a run whose write fails leaves no decisions claiming to explain records
+    #    that do not exist.
+    persist_run(
+        conn,
+        res_report,
+        pairs,
+        auto_match=AUTO_MATCH_THRESHOLD,
+        auto_reject=AUTO_REJECT_THRESHOLD,
+        golden_ids=dict(
+            zip(
+                assignments[SOURCE_IDENTITY_COLUMN].to_list(),
+                assignments["person_id"].to_list(),
+                strict=True,
+            )
+        ),
+    )
+
     # -- write. Golden entities, then the crosswalk pointing every source key at
     #    the identity it resolved to.
     person_write = write_entities(conn, golden_persons, PERSON)
@@ -169,9 +323,7 @@ def run_pipeline(
 
     policies = frames["policy"]
     if policies.height:
-        policies = policies.with_columns(
-            pl.Series("policy_id", [str(uuid7()) for _ in range(policies.height)])
-        )
+        policies = _golden_policy_ids(conn, policies)
         policy_write = write_entities(conn, policies, POLICY)
         result.writes["policy"] = policy_write.as_dict()
 

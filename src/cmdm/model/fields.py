@@ -74,6 +74,16 @@ class FieldSpec:
     pii: PII = PII.NONE
     #: Computed by this system. Rejected if supplied by a source payload.
     derived: bool = False
+    #: The attribute this one is computed from, when there is exactly one.
+    #:
+    #: Survivorship reads it to keep the pair consistent. Without it every
+    #: attribute picks its winner independently, so a record can survive with
+    #: ``full_name`` from one source and ``full_name_normalized`` from another
+    #: -- and since search, blocking and the match keys all read the normalized
+    #: form, the customer becomes findable only under a name the golden record
+    #: does not show. Left null for derived values with no single parent, such
+    #: as a quality score computed from everything.
+    derived_from: str | None = None
     #: Backed by an enum; projects to an Arrow dictionary and a Postgres enum.
     enum_name: str | None = None
     #: Emit a database index. Set for keys and for blocking columns, which are
@@ -89,6 +99,10 @@ class FieldSpec:
             raise ValueError(
                 f"{self.name}: derived fields must use DERIVED or SYSTEM survivorship, "
                 f"got {self.survivorship}"
+            )
+        if self.derived_from is not None and not self.derived:
+            raise ValueError(
+                f"{self.name}: derived_from is set but the field is not derived"
             )
         if self.enum_name is not None and self.dtype is not LT.STRING:
             raise ValueError(f"{self.name}: enum-backed fields must be STRING")
@@ -618,6 +632,7 @@ PERSON = EntitySpec(
             match_role=MR.COMPARATOR,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_tokens",
@@ -629,6 +644,7 @@ PERSON = EntitySpec(
             survivorship=SS.DERIVED,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_sorted_key",
@@ -641,6 +657,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
             indexed=True,
         ),
         FieldSpec(
@@ -654,6 +671,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
             indexed=True,
         ),
         FieldSpec(
@@ -665,6 +683,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.INDIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "given_name_derived",
@@ -675,6 +694,7 @@ PERSON = EntitySpec(
             match_role=MR.COMPARATOR,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "middle_name_derived",
@@ -683,6 +703,7 @@ PERSON = EntitySpec(
             survivorship=SS.DERIVED,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "surname_derived",
@@ -693,6 +714,7 @@ PERSON = EntitySpec(
             match_role=MR.COMPARATOR,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_prefix_derived",
@@ -700,6 +722,7 @@ PERSON = EntitySpec(
             "Honorific stripped during normalization, retained for display.",
             survivorship=SS.DERIVED,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_suffix_derived",
@@ -709,6 +732,7 @@ PERSON = EntitySpec(
             "names is evidence of two people, not one.",
             survivorship=SS.DERIVED,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_parse_confidence",
@@ -717,6 +741,7 @@ PERSON = EntitySpec(
             "components by this, so a doubtful parse cannot drive a merge.",
             survivorship=SS.DERIVED,
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "name_parse_method",
@@ -727,6 +752,7 @@ PERSON = EntitySpec(
             survivorship=SS.DERIVED,
             enum_name="NameParseMethod",
             derived=True,
+            derived_from="full_name",
         ),
         FieldSpec(
             "date_of_birth",
@@ -807,6 +833,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="email_address",
             indexed=True,
         ),
         FieldSpec(
@@ -825,6 +852,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="phone_raw",
             indexed=True,
         ),
         FieldSpec(
@@ -881,6 +909,7 @@ PERSON = EntitySpec(
             match_role=MR.COMPARATOR,
             pii=PII.DIRECT,
             derived=True,
+            derived_from="address_line1",
         ),
         FieldSpec(
             "address_key",
@@ -892,6 +921,7 @@ PERSON = EntitySpec(
             match_role=MR.BLOCKING,
             pii=PII.INDIRECT,
             derived=True,
+            derived_from="address_line1",
             indexed=True,
         ),
         FieldSpec(

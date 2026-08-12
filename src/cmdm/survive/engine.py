@@ -46,7 +46,9 @@ __all__ = [
     "SurvivorshipReport",
     "survive",
     "strategy_expression",
+    "frequency_column",
     "CONTRIBUTOR_COLUMN",
+    "CONTRIBUTOR_KEY_COLUMNS",
     "RECENCY_COLUMN",
     "TRUST_COLUMN",
 ]
@@ -54,6 +56,23 @@ __all__ = [
 #: Column identifying the source record a value came from. Carried through the
 #: whole pass so the winning value can name its origin.
 CONTRIBUTOR_COLUMN = "source_record_id"
+
+#: Columns whose combination identifies one contributor, used together as the
+#: final tie-break.
+#:
+#: ``source_record_id`` alone is not enough, and the reason is structural rather
+#: than incidental: one policy row yields an owner, an insured and an agent, so
+#: three contributor rows legitimately share it. Two of them landing in the same
+#: cluster tie on that column, the tie falls through to row order, and Polars
+#: group-by is threaded — so the same input produced a different golden value on
+#: every run. The identity triple is what actually distinguishes one contributor
+#: from another after collapse.
+CONTRIBUTOR_KEY_COLUMNS = (
+    "source_record_id",
+    "source_system",
+    "source_key_kind",
+    "source_party_key",
+)
 
 #: Column driving MOST_RECENT. The source's own assertion of when the record
 #: last changed, falling back to ingest time at landing.
@@ -98,7 +117,48 @@ def _ordered_first(column: str, order_by: Sequence[pl.Expr]) -> pl.Expr:
     return pl.col(column).sort_by(order_by, descending=True).drop_nulls().first()
 
 
-def strategy_expression(spec: FieldSpec, *, tie_break: pl.Expr | None = None) -> pl.Expr:
+def frequency_column(name: str) -> str:
+    """Name of the helper column counting a value's occurrences in its cluster.
+
+    Computed before the group-by as a window, because ``MOST_FREQUENT`` needs to
+    rank each contributor by how many contributors agree with it, and that is a
+    per-row number that cannot be derived inside the aggregation that consumes
+    it without a nested group-by.
+    """
+    return f"_freq__{name}"
+
+
+def _follow(column: str, parent: str, order_by: Sequence[pl.Expr]) -> pl.Expr:
+    """Take a derived value from the record whose parent value survived.
+
+    The alternative — letting each attribute pick its own winner — produces a
+    golden record whose ``full_name`` and ``full_name_normalized`` come from
+    different sources and describe different people. On the reference batch that
+    was 290 of 2,712 records, and it is worse than a cosmetic inconsistency:
+    search, blocking and every comparator read the normalized form, so those
+    customers were findable only under a name their own record did not display.
+
+    Rows where the parent is null are excluded rather than ranked last, because
+    a derived value whose parent did not survive is a value computed from
+    something this record no longer claims.
+    """
+    ordered_parent = pl.col(parent).sort_by(order_by, descending=True)
+    return (
+        pl.col(column)
+        .sort_by(order_by, descending=True)
+        .filter(ordered_parent.is_not_null())
+        .first()
+    )
+
+
+def strategy_expression(
+    spec: FieldSpec,
+    *,
+    tie_break: pl.Expr | None = None,
+    frequency: pl.Expr | None = None,
+    parent: FieldSpec | None = None,
+    parent_frequency: pl.Expr | None = None,
+) -> pl.Expr:
     """Build the aggregation implementing one field's declared strategy.
 
     ``tie_break`` is appended to every ordering so that a strategy which would
@@ -106,39 +166,24 @@ def strategy_expression(spec: FieldSpec, *, tie_break: pl.Expr | None = None) ->
     deterministic answer. Without it, survivorship output depends on row order
     and a re-run over identical input can produce a different golden record —
     which makes every downstream diff untrustworthy.
+
+    ``parent`` is the spec named by ``derived_from``. When present, the derived
+    value is taken from whichever contributor won the parent instead of being
+    ranked on its own.
     """
     column = spec.name
     trust = pl.col(TRUST_COLUMN)
     recency = pl.col(RECENCY_COLUMN)
     tail: list[pl.Expr] = [tie_break] if tie_break is not None else []
 
+    if parent is not None:
+        return _follow(
+            column,
+            parent.name,
+            _ordering(parent, trust, recency, tail, parent_frequency),
+        )
+
     match spec.survivorship:
-        case SS.MOST_RECENT:
-            return _ordered_first(column, [recency, trust, *tail])
-
-        case SS.MOST_TRUSTED_SOURCE:
-            return _ordered_first(column, [trust, recency, *tail])
-
-        case SS.MOST_COMPLETE:
-            # Longest non-null value. Recovers names and addresses truncated by
-            # a source's column width, which no recency or trust rule can.
-            length = pl.col(column).cast(pl.String, strict=False).str.len_chars()
-            return _ordered_first(column, [length.fill_null(0), trust, *tail])
-
-        case SS.MOST_FREQUENT:
-            # Modal value across contributors, ties broken by trust. Expressed
-            # as a sort over (count, trust) rather than mode() because mode()
-            # gives no control over the tie.
-            counts = pl.col(column).drop_nulls().value_counts(sort=True)
-            return (
-                pl.when(counts.len() > 0)
-                .then(counts.first().struct.field(column))
-                .otherwise(_ordered_first(column, [trust, *tail]))
-            )
-
-        case SS.FIRST_NON_NULL:
-            return _ordered_first(column, [trust, *tail])
-
         case SS.AGGREGATE_MAX:
             return pl.col(column).max()
 
@@ -151,13 +196,55 @@ def strategy_expression(spec: FieldSpec, *, tie_break: pl.Expr | None = None) ->
             # compliance breach, not a data-quality blemish.
             return pl.col(column).fill_null(False).any()
 
-        case SS.DERIVED | SS.SYSTEM:
-            # Recomputed after the merge from the surviving values, or assigned
-            # by the writer. Taking any contributor's copy would be wrong.
-            return _ordered_first(column, [trust, *tail])
+        case _:
+            return _ordered_first(
+                column, _ordering(spec, trust, recency, tail, frequency)
+            )
 
-        case _:  # pragma: no cover - exhaustive over the enum
-            raise ValueError(f"{column}: no aggregation for {spec.survivorship}")
+
+def _ordering(
+    spec: FieldSpec,
+    trust: pl.Expr,
+    recency: pl.Expr,
+    tail: Sequence[pl.Expr],
+    frequency: pl.Expr | None,
+) -> list[pl.Expr]:
+    """The sort keys implementing one ranking strategy, best first.
+
+    Factored out from the aggregation it usually feeds because a derived
+    attribute has to rank its contributors by its *parent's* strategy in order
+    to end up with the parent's winner.
+    """
+    match spec.survivorship:
+        case SS.MOST_RECENT:
+            return [recency, trust, *tail]
+
+        case SS.MOST_TRUSTED_SOURCE:
+            return [trust, recency, *tail]
+
+        case SS.MOST_COMPLETE:
+            # Longest non-null value. Recovers names and addresses truncated by
+            # a source's column width, which no recency or trust rule can.
+            length = pl.col(spec.name).cast(pl.String, strict=False).str.len_chars()
+            return [length.fill_null(0), trust, *tail]
+
+        case SS.MOST_FREQUENT:
+            # Modal value across contributors, ties broken by trust and then by
+            # the tie-break, like every other ranking strategy. Expressed as a
+            # sort over (count, trust, …) rather than value_counts().first(),
+            # which returns the modal value but decides a tied count by
+            # whichever value the hash table happened to emit first — so two
+            # contributors disagreeing one-to-one produced a different golden
+            # value on every run.
+            return [frequency, trust, *tail] if frequency is not None else [trust, *tail]
+
+        case SS.FIRST_NON_NULL | SS.DERIVED | SS.SYSTEM:
+            # DERIVED lands here only when it names no parent — a value computed
+            # from the whole record rather than from one attribute.
+            return [trust, *tail]
+
+        case _:  # pragma: no cover - the aggregate strategies never reach here
+            raise ValueError(f"{spec.name}: {spec.survivorship} has no ordering")
 
 
 @dataclass(slots=True)
@@ -250,14 +337,55 @@ def survive(
 
     # Deterministic final tie-break. Without it the result depends on row order
     # and a re-run over identical input can differ.
+    key_columns = [c for c in CONTRIBUTOR_KEY_COLUMNS if c in frame.columns]
     tie_break = (
-        pl.col(CONTRIBUTOR_COLUMN).cast(pl.String)
-        if CONTRIBUTOR_COLUMN in frame.columns
+        pl.concat_str(
+            [pl.col(c).cast(pl.String).fill_null("") for c in key_columns],
+            separator="\x1f",
+        )
+        if key_columns
         else None
     )
 
+    # A derived attribute follows the contributor that won the attribute it is
+    # computed from. Resolved against the whole entity rather than the candidate
+    # list, then filtered to parents actually present: a batch that carries
+    # full_name_normalized but not full_name has nothing to follow, and ranking
+    # the derived value on its own is the right fallback there.
+    by_name = spec.by_name
+    parents = {
+        f.name: by_name[f.derived_from]
+        for f in candidates
+        if f.derived_from and f.derived_from in available
+    }
+
+    # Occurrence counts for the modal strategy, as one windowed pass rather than
+    # a nested group-by per field.
+    modal = {
+        f.name
+        for f in [*candidates, *parents.values()]
+        if f.survivorship is SS.MOST_FREQUENT and f.name in available
+    }
+    if modal:
+        frame = frame.with_columns(
+            pl.len().over([master_column, name]).alias(frequency_column(name))
+            for name in sorted(modal)
+        )
+
+    def frequency(f: FieldSpec | None) -> pl.Expr | None:
+        if f is None or f.name not in modal:
+            return None
+        return pl.col(frequency_column(f.name))
+
     aggregations = [
-        strategy_expression(f, tie_break=tie_break).alias(f.name) for f in candidates
+        strategy_expression(
+            f,
+            tie_break=tie_break,
+            frequency=frequency(f),
+            parent=parents.get(f.name),
+            parent_frequency=frequency(parents.get(f.name)),
+        ).alias(f.name)
+        for f in candidates
     ]
     # Contributor bookkeeping, so the golden row can state how much evidence
     # stands behind it without a second pass.

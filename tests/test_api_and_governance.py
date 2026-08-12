@@ -664,8 +664,40 @@ def test_metrics_endpoint_is_exposition_format(client) -> None:
     assert "cmdm_golden_entities" in response.text
 
 
-def test_console_requires_authentication(client) -> None:
-    assert client.get("/console").status_code == 403
+def test_console_sends_an_unauthenticated_browser_to_sign_in(client) -> None:
+    """A person cannot act on a 403 with a JSON body; they need the form."""
+    response = client.get("/console", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/console/login")
+
+
+def test_console_login_exchanges_a_key_for_a_session(client, keys) -> None:
+    response = client.post(
+        "/console/login",
+        data={"key": keys[Role.VIEWER], "next": "/console"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/console"
+    assert client.get("/console").status_code == 200
+
+
+def test_console_login_refuses_a_bad_key(client) -> None:
+    response = client.post(
+        "/console/login", data={"key": "not-a-key"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/console/login")
+    assert "cmdm_session" not in response.cookies
+
+
+def test_console_login_will_not_redirect_off_site(client, keys) -> None:
+    response = client.post(
+        "/console/login",
+        data={"key": keys[Role.VIEWER], "next": "https://elsewhere.example/steal"},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/console"
 
 
 def test_business_console_renders(client, keys) -> None:

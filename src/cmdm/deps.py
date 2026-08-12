@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from typing import Annotated
 
 import psycopg
-from fastapi import Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException
 
 from cmdm.db.engine import connect
 from cmdm.governance.rbac import (
@@ -35,7 +35,26 @@ from cmdm.governance.rbac import (
     log_access,
 )
 
-__all__ = ["get_connection", "get_principal", "require", "ConnectionDep", "PrincipalDep"]
+__all__ = [
+    "get_connection",
+    "get_principal",
+    "require",
+    "ConnectionDep",
+    "PrincipalDep",
+    "SESSION_COOKIE",
+]
+
+#: Where the console keeps the caller's key. A browser cannot set an
+#: ``X-API-Key`` header on a plain navigation, so without this the consoles are
+#: reachable only from curl -- which is not a UI.
+#:
+#: It holds the API key itself rather than a minted session token. That is a
+#: bearer credential in a cookie, and it is defensible only with the flags the
+#: login route sets: ``HttpOnly`` keeps it out of any script on the page, and
+#: ``SameSite=Lax`` is what stops another site POSTing to /console/steward/decide
+#: with the operator's cookie attached. A deployment that already has SSO should
+#: put it in front of this and map the assertion to a principal instead.
+SESSION_COOKIE = "cmdm_session"
 
 
 def get_connection() -> Iterator[psycopg.Connection]:
@@ -55,14 +74,20 @@ ConnectionDep = Annotated[psycopg.Connection, Depends(get_connection)]
 def get_principal(
     conn: ConnectionDep,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
 ) -> Principal:
     """Resolve the caller.
+
+    Header first, cookie second. A machine caller that sends a key means that
+    key even if a stale console cookie is riding along on the same connection,
+    and the reverse -- letting a cookie win -- would let a browser session
+    silently answer for an integration.
 
     An unauthenticated request yields the anonymous principal, which holds no
     roles -- so it fails every authorization check rather than falling through
     to a permissive default.
     """
-    return authenticate(conn, x_api_key)
+    return authenticate(conn, x_api_key or session)
 
 
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
