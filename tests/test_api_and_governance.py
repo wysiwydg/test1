@@ -664,6 +664,41 @@ def test_metrics_endpoint_is_exposition_format(client) -> None:
     assert "cmdm_golden_entities" in response.text
 
 
+def test_a_refused_request_is_recorded(client, keys, migrated) -> None:
+    """A rejected attempt must survive the rejection.
+
+    The DENIED row was written on the request's own connection, and the request
+    then raised a 403 -- which rolls that connection back, taking the record of
+    the refusal with it. Two 403s produced zero audit rows.
+    """
+    import psycopg as _psycopg
+
+    with _psycopg.connect(migrated) as before:
+        start = before.execute(
+            "SELECT count(*) FROM mdm.access_log WHERE action = 'DENIED'"
+        ).fetchone()[0]
+
+    response = client.post(
+        "/batches?mapping_name=life_admin",
+        files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")},
+        headers={"X-API-Key": keys[Role.VIEWER]},
+    )
+    assert response.status_code == 403
+
+    with _psycopg.connect(migrated) as after:
+        row = after.execute(
+            "SELECT subject, detail FROM mdm.access_log WHERE action = 'DENIED' "
+            "ORDER BY occurred_at DESC LIMIT 1"
+        ).fetchone()
+        total = after.execute(
+            "SELECT count(*) FROM mdm.access_log WHERE action = 'DENIED'"
+        ).fetchone()[0]
+
+    assert total == start + 1
+    assert row[0] == "test-viewer@x.com"
+    assert row[1]["attempted"] == "SUBMIT"
+
+
 def test_console_sends_an_unauthenticated_browser_to_sign_in(client) -> None:
     """A person cannot act on a 403 with a JSON body; they need the form."""
     response = client.get("/console", follow_redirects=False)

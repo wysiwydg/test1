@@ -19,6 +19,7 @@ them and treats them as query parameters instead.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from typing import Annotated
 
@@ -99,9 +100,33 @@ def require(principal: Principal, action: str, conn: psycopg.Connection) -> None
     A refused request is logged as DENIED. Failed access attempts are the first
     thing an incident review looks for, and a system that only logs successes
     cannot show them.
+
+    The denial is written on its own connection, not the request's. The request
+    is about to fail, and :func:`get_connection` rolls back on exception -- so
+    logging the refusal on the same transaction rolls the record of the refusal
+    back with it, which is how this originally recorded nothing at all. An audit
+    entry for a rejected attempt must not be undone by the rejection.
     """
     try:
         authorize(principal, action)
     except AccessDenied as exc:
-        log_access(conn, principal, Action.DENIED, detail={"attempted": action})
+        _log_denial(principal, action)
         raise HTTPException(status_code=403, detail=str(exc)) from None
+
+
+def _log_denial(principal: Principal, action: str) -> None:
+    """Record a refused attempt, independently of the request that failed.
+
+    Best-effort by design: a database that cannot record the denial must not
+    turn a 403 into a 500, because that hands the caller a different answer
+    depending on whether the audit write succeeded -- and the difference is
+    itself information about the system.
+    """
+    try:
+        with connect() as audit:
+            log_access(audit, principal, Action.DENIED, detail={"attempted": action})
+            audit.commit()
+    except Exception:  # pragma: no cover - audit must not mask the 403
+        logging.getLogger(__name__).exception(
+            "could not record DENIED for %s on %s", principal.subject, action
+        )
