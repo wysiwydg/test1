@@ -128,6 +128,69 @@ def test_unparseable_dates_are_reported_with_samples(raw, mapping) -> None:
     assert issue.sample, "an error a human must act on needs example values"
 
 
+def test_a_date_of_birth_column_is_checked_too(raw, mapping) -> None:
+    """DOB lives in a party block, and the check only covered policy dates.
+
+    It is the date that matters most: date_of_birth is both a comparator and a
+    veto, so a feed whose format changed weakens matching across the whole batch
+    while the API reports the file as clean.
+    """
+    broken = raw.with_columns(pl.lit("31/31/9999").alias("OwnerDOB"))
+    report = validate_batch(broken, mapping)
+    issue = next(
+        i for i in report.issues
+        if i.code == "DATE_FORMAT_MISMATCH" and i.column == "OwnerDOB"
+    )
+    assert "OWNER" in issue.message
+
+
+def test_a_day_first_to_month_first_switch_is_caught(raw, mapping) -> None:
+    """The failure the check exists for, and the one 50% could not see.
+
+    Under month-first only the days above 12 fail to parse, so on a real feed
+    roughly two thirds still come through -- silently, and as the wrong date.
+    """
+    # Month-first. Only 02/01 has a day the configured day-first format accepts.
+    month_first = ["02/13/1980", "02/20/1980", "02/25/1980", "02/01/1980"]
+    swapped = raw.with_columns(
+        pl.Series("OwnerDOB", month_first[: raw.height])
+    )
+    report = validate_batch(swapped, mapping)
+    issue = next(
+        i for i in report.issues
+        if i.code == "DATE_FORMAT_MISMATCH" and i.column == "OwnerDOB"
+    )
+    assert "OWNER" in issue.message
+    assert issue.sample, "an error a human must act on needs example values"
+
+
+def test_the_validator_uses_the_mapping_formats_not_the_defaults(mapping) -> None:
+    """A check looser than the pipeline it guards is worse than none.
+
+    The module default list holds both %d/%m/%Y and %m/%d/%Y, so validating
+    against it accepted a month-first column that the shredder -- which does
+    pass the mapping's formats -- then nulled.
+    """
+    from cmdm.ingest.normalize import _DATE_FORMATS, parse_date
+
+    assert "%m/%d/%Y" in _DATE_FORMATS
+    assert "%m/%d/%Y" not in mapping.date_formats
+
+    frame = pl.DataFrame({"d": ["02/13/1980"]})
+    lenient = frame.select(parse_date(pl.col("d")).alias("x"))["x"][0]
+    strict = frame.select(
+        parse_date(pl.col("d"), tuple(mapping.date_formats)).alias("x")
+    )["x"][0]
+    assert lenient is not None, "the default list accepts month-first"
+    assert strict is None, "the mapping's formats do not"
+
+
+def test_a_clean_extract_raises_no_date_warnings(raw, mapping) -> None:
+    """The threshold has to sit above real feeds or it is noise."""
+    report = validate_batch(raw, mapping)
+    assert not [i for i in report.issues if i.code == "DATE_FORMAT_MISMATCH"]
+
+
 def test_duplicate_policy_numbers_warn_but_do_not_block(raw, mapping) -> None:
     """A full extract concatenated with a delta is normal, not a fault."""
     doubled = pl.concat([raw, raw])

@@ -47,6 +47,8 @@ __all__ = [
     "land_batch",
     "accept_batch",
     "MAX_REJECT_RATIO",
+    "DATE_PARSE_WARN",
+    "DATE_PARSE_ERROR",
 ]
 
 #: A batch where more than this share of rows are unusable is rejected whole
@@ -55,6 +57,20 @@ __all__ = [
 #: its good half creates a golden record built from a fragment, which is worse
 #: than landing nothing and saying so.
 MAX_REJECT_RATIO = 0.20
+
+#: Share of populated date values that must parse before a column is reported.
+#:
+#: Not 0.5. The failure this exists to catch is a source switching between
+#: day-first and month-first, and that only breaks the days above 12 -- roughly
+#: two thirds still parse, silently and wrongly. A single 50% threshold
+#: therefore stays quiet through exactly the change it was written for. A feed
+#: whose format is right parses very nearly everything, so the bar is set where
+#: a real feed sits and scattered junk ("N/A", "0000-00-00") is tolerated.
+DATE_PARSE_WARN = 0.95
+
+#: Below this, the column is not dirty -- the format is simply wrong -- and the
+#: batch is refused rather than landed as a column of nulls.
+DATE_PARSE_ERROR = 0.50
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,29 +252,53 @@ def validate_batch(raw: pl.DataFrame, mapping: SourceMapping) -> ValidationRepor
     # Date columns that parse for almost nothing usually mean the source changed
     # format, not that the data is bad. Catching it here saves a batch full of
     # nulls that looks like missing data rather than a parsing failure.
+    #
+    # Every date column, not only the policy-grain ones. Dates of birth live in
+    # the party blocks, and they are the ones that matter most: date_of_birth is
+    # both a comparator and a veto, so a feed that switches to month-first
+    # silently drops the values that cannot parse and mis-parses the ones where
+    # both numbers are under 13. Checking only the policy dates let a batch
+    # through reporting zero warnings while losing 184 of 567 dates of birth.
     from cmdm.ingest.normalize import parse_date
 
     date_fields = [
-        f for f in mapping.policy if f.transform == "date" and f.source
+        (None, f) for f in mapping.policy if f.transform == "date" and f.source
+    ] + [
+        (party.role.value, f)
+        for party in mapping.parties
+        for f in party.fields
+        if f.transform == "date" and f.source
     ]
-    for fm in date_fields:
+    for role, fm in date_fields:
         series = raw.get_column(fm.source).cast(pl.String, strict=False)
         populated = series.is_not_null() & (series.str.strip_chars().str.len_chars() > 0)
         non_null = int(populated.sum())
         if non_null == 0:
             continue
+        # The mapping's formats, not the module default. The default list holds
+        # both %d/%m/%Y and %m/%d/%Y, so validating against it accepts a column
+        # the shredder -- which does pass the mapping's formats -- will then fail
+        # to parse. A check more permissive than the pipeline it guards is worse
+        # than no check: it reports the file clean and the dates vanish later.
         parsed = int(
-            raw.select(parse_date(pl.col(fm.source).cast(pl.String, strict=False)).alias("d"))["d"]
+            raw.select(
+                parse_date(
+                    pl.col(fm.source).cast(pl.String, strict=False),
+                    tuple(mapping.date_formats),
+                ).alias("d")
+            )["d"]
             .is_not_null()
             .sum()
         )
-        if parsed < non_null * 0.5:
+        if parsed < non_null * DATE_PARSE_WARN:
+            where = f" for role {role}" if role else ""
             report.issues.append(
                 ValidationIssue(
-                    "ERROR" if parsed == 0 else "WARNING",
+                    "ERROR" if parsed < non_null * DATE_PARSE_ERROR else "WARNING",
                     "DATE_FORMAT_MISMATCH",
-                    f"Only {parsed} of {non_null} populated values in {fm.source!r} parse with "
-                    f"the configured formats {list(mapping.date_formats)}.",
+                    f"Only {parsed} of {non_null} populated values in {fm.source!r}"
+                    f"{where} parse with the configured formats "
+                    f"{list(mapping.date_formats)}.",
                     column=fm.source,
                     row_count=non_null - parsed,
                     sample=_sample(series),
