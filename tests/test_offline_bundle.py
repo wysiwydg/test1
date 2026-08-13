@@ -132,3 +132,67 @@ def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:
     assert not replaced & set(module.PRESERVED)
     for name in ("pgdata", "config.cmd", "config.sh", ".venv", "wheels", "pgsql"):
         assert name in module.PRESERVED
+
+
+# ---------------------------------------------------------------------------
+# The verifier
+# ---------------------------------------------------------------------------
+
+
+def _verify_module():
+    import importlib.util
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = next(
+        (c for c in (root / "offline" / "verify.py", root / "verify.py") if c.exists()),
+        None,
+    )
+    if source is None:  # pragma: no cover - neither layout
+        pytest.skip("verify.py not present in this layout")
+
+    spec = importlib.util.spec_from_file_location("cmdm_verify", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_verifier_runs_in_a_database_it_owns() -> None:
+    """It used to run in the app's own store: it TRUNCATEd the landing zone to
+    make room for the sample -- destroying the delivered bytes the whole system
+    is designed to be rebuildable from -- and then asserted counts over the
+    whole store, which only hold if nothing else is in it. On a working
+    installation that failed with "expected 15,000 role edges, got 29,985" and
+    blamed the machine for the verifier's own arithmetic."""
+    module = _verify_module()
+    source = (pathlib.Path(module.__file__)).read_text(encoding="utf-8")
+
+    assert module.SCRATCH_DATABASE
+
+    # Executed SQL only. The word appears in the comment explaining why it no
+    # longer does, and a check that failed on its own explanation would be an
+    # incentive to delete the explanation.
+    executed = [
+        line for line in source.splitlines()
+        if "TRUNCATE" in line.upper() and not line.lstrip().startswith(("#", "*", '"'))
+    ]
+    assert not executed, (
+        "the verifier truncates something; it runs in its own database and has "
+        f"nothing of its own to clear: {executed}"
+    )
+
+
+def test_the_verifier_scratch_database_is_not_the_app_store() -> None:
+    """The name has to differ from the default database, or 'its own database'
+    is the app's database under another description."""
+    module = _verify_module()
+    assert module.SCRATCH_DATABASE != "cmdm"
+
+
+def test_the_edge_assertion_is_stated_as_a_relationship() -> None:
+    """`edges == 15000` is a fact about one sample's size. `edges == policies *
+    3` is the claim actually being made -- three parties on every policy -- and
+    survives the sample changing while still failing on a missing role."""
+    module = _verify_module()
+    source = (pathlib.Path(module.__file__)).read_text(encoding="utf-8")
+    assert "result.policies * 3" in source
+    assert "edges == 15000" not in source

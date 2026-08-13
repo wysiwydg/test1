@@ -20,8 +20,19 @@ import socket
 import sys
 import time
 import traceback
+import warnings
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+# Starlette's TestClient warns that it prefers httpx2 over httpx. Nothing here
+# can act on it -- the bundle ships the closure pip resolved, and it concerns a
+# dependency of a dependency used only by the checks below. Left visible it
+# prints a four-line block in the middle of the step it interrupts, breaking the
+# one-line-per-check layout and teaching the reader to skim output whose whole
+# purpose is to be read carefully.
+warnings.filterwarnings(
+    "ignore", message=r"Using `httpx` with `starlette\.testclient` is deprecated"
+)
 
 # The embedded server and the golden store live beside the bundle.
 os.environ.setdefault("CMDM_HOME", str(HERE))
@@ -106,18 +117,66 @@ def check_imports() -> str:
     return f"polars {pl.__version__}"
 
 
+#: The database this verifier owns. Everything below runs here, never in the
+#: store the app uses.
+#:
+#: It used to run in the app's own database, which was wrong twice over. It
+#: TRUNCATEd the landing zone -- the delivered bytes of every batch ever
+#: accepted, which the whole system treats as the thing it can always rebuild
+#: from -- to make room for the sample. And its assertions were counts over the
+#: whole store, which only hold if nothing else is in it, so running it on a
+#: working installation failed with "expected 15,000 role edges, got 29,985"
+#: and blamed the machine for the verifier's own arithmetic.
+SCRATCH_DATABASE = "cmdm_verify"
+
+
+def _scratch_dsn(base: str) -> tuple[str, bool]:
+    """A private database on the same server, dropped and recreated.
+
+    Returns the DSN and whether it is genuinely separate from ``base``. A
+    locked-down external PostgreSQL may refuse CREATE DATABASE; that is
+    reported rather than worked around, because the fallback would be to use
+    the caller's own store, which is the behaviour being fixed.
+    """
+    import psycopg
+    from psycopg import conninfo
+
+    parts = conninfo.conninfo_to_dict(base)
+    if parts.get("dbname") == SCRATCH_DATABASE:
+        return base, True
+
+    admin = conninfo.make_conninfo(**{**parts, "dbname": "postgres"})
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DATABASE}"')
+        conn.execute(f'CREATE DATABASE "{SCRATCH_DATABASE}"')
+
+    return conninfo.make_conninfo(**{**parts, "dbname": SCRATCH_DATABASE}), True
+
+
 @step("the embedded PostgreSQL starts")
 def check_postgres() -> str:
     from cmdm.embedded import ensure_dsn
 
-    dsn = ensure_dsn()
-    os.environ["CMDM_DSN"] = dsn
+    base = os.environ.get("CMDM_DSN") or ensure_dsn()
 
     import psycopg
 
+    try:
+        dsn, private = _scratch_dsn(base)
+    except Exception as exc:
+        raise AssertionError(
+            f"could not create the {SCRATCH_DATABASE!r} database this check "
+            f"runs in ({type(exc).__name__}: {exc}). The verifier will not run "
+            "in the store the app uses -- it would truncate the landing zone. "
+            "Point CMDM_DSN at a server where it may create a database, or "
+            "unset it to use the embedded one."
+        ) from None
+
+    os.environ["CMDM_DSN"] = dsn
     with psycopg.connect(dsn) as conn:
         version = conn.execute("SELECT version()").fetchone()[0]
-    return version.split(" on ")[0]
+    where = f"in {SCRATCH_DATABASE}" if private else ""
+    return f"{version.split(' on ')[0]} {where}".strip()
 
 
 @step("the schema applies")
@@ -152,8 +211,8 @@ def check_pipeline() -> str:
     raw = pl.read_csv(sample, infer_schema_length=0)
 
     with psycopg.connect(os.environ["CMDM_DSN"]) as conn:
-        conn.execute("TRUNCATE mdm.ingest_batch, mdm.source_record, mdm.work_queue CASCADE")
-        conn.commit()
+        # No truncate. This runs in its own database, so there is nothing here
+        # to clear and nothing of anybody's to lose.
         batch_id, report, enqueued = accept_batch(
             conn, raw, mapping, origin="VERIFY", filename=sample.name,
             submitted_by="verify",
@@ -173,7 +232,13 @@ def check_pipeline() -> str:
     assert result.policies == 5000, f"expected 5,000 policies, got {result.policies}"
     assert result.golden_persons > 2000, f"only {result.golden_persons} golden persons"
     assert pairs > 0, "no match decisions were recorded"
-    assert edges == 15000, f"expected 15,000 role edges, got {edges}"
+    # Three parties on every policy -- owner, insured, agent. Stated as the
+    # relationship it is rather than as the number it comes to, so a change to
+    # the sample's size moves it and a genuinely missing role still fails.
+    assert edges == result.policies * 3, (
+        f"expected {result.policies * 3:,} role edges for {result.policies:,} "
+        f"policies, got {edges:,}"
+    )
 
     households = result.households
     assert households and households.households > 300, \
@@ -279,19 +344,30 @@ def check_consoles() -> str:
 def check_tests() -> str:
     """The long one, and the only step that is optional.
 
-    It is 441 tests, most of which open a database transaction. On Windows
-    every one of those is a TCP connection rather than a Unix socket, so this
-    step alone can take several minutes where it takes twenty seconds
+    It is several hundred tests, most of which open a database transaction. On
+    Windows every one of those is a TCP connection rather than a Unix socket, so
+    this step alone can take several minutes where it takes twenty seconds
     elsewhere. Steps 1-8 have already exercised the whole system end to end;
     this is the belt to their braces, and --quick skips it.
-    """
-    import pytest
 
-    os.environ["CMDM_TEST_DSN"] = os.environ["CMDM_DSN"]
+    Run in a subprocess rather than through ``pytest.main``. Steps 1-8 have
+    already imported FastAPI, Starlette and anyio into this interpreter, and
+    pytest cannot instrument a plugin module that is already imported -- so an
+    in-process run reported ``PytestAssertRewriteWarning ... anyio`` on every
+    pass. Suppressing that would have hidden the real point, which is that the
+    suite was inheriting the state of eight checks that ran before it.
+    """
+    import subprocess
+
+    # The suite truncates the store it runs against, so it gets the same private
+    # database as everything above rather than whatever CMDM_DSN pointed at.
+    environment = dict(os.environ)
+    environment["CMDM_TEST_DSN"] = environment["CMDM_DSN"]
     print()  # pytest writes its own progress dots below
-    code = pytest.main(
-        [str(HERE / "tests"), "-q", "-p", "no:cacheprovider",
-         "--rootdir", str(HERE), "-x"]
+    code = subprocess.call(
+        [sys.executable, "-m", "pytest", str(HERE / "tests"), "-q",
+         "-p", "no:cacheprovider", "--rootdir", str(HERE), "-x"],
+        cwd=str(HERE), env=environment,
     )
     assert code == 0, f"pytest exited {code}"
     return "all tests green"
@@ -304,6 +380,8 @@ def main() -> int:
     print(f"  bundle:  {HERE}")
     print(f"  python:  {sys.version.split()[0]}")
     print(f"  data:    {os.environ['CMDM_HOME']}")
+    print(f"  runs in: the {SCRATCH_DATABASE} database, which it creates and "
+          "owns; your store is not touched")
     total = sum(BASELINE.values()) - (BASELINE[9] if quick else 0)
     print(f"  expect:  around {total:.0f}s on a quiet Linux box; two to five "
           "times that on Windows\n")

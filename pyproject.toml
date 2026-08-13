@@ -88,6 +88,14 @@ packages = ["src/cmdm"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
+filterwarnings = [
+    # Starlette's TestClient warns that it prefers httpx2 over httpx. Nothing
+    # here can act on it: the bundle ships the closure pip resolved, and the
+    # warning is about a dependency of a dependency used only by tests. Left
+    # visible it prints a four-line block in the middle of every run, which
+    # trains people to read past output that is meant to be read.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.ruff]
 line-length = 100

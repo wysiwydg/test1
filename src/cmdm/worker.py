@@ -671,6 +671,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             with connect_pool() as conn:
                 stale = stale_key_kinds(conn, installed)
             if not stale:
+                # Deliberately the only thing checked. One source key resolving
+                # to two parties is the failure that matters, and the crosswalk
+                # already has a unique index on the natural key that makes it
+                # impossible -- so a check for it could never fire, and shipping
+                # one would imply a coverage that does not exist. A *re-keyed*
+                # mapping is how the same damage happens without violating
+                # anything: the old rows sit under a key kind nothing writes to,
+                # perfectly legal and completely wrong.
                 log.info("the crosswalk matches the installed mappings")
                 return 0
             for kind, n in sorted(stale.items()):
