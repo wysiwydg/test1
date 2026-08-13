@@ -15,7 +15,7 @@ database** and **no Python packages installed**. The only prerequisite is
 | `src/`, `tests/`, `scripts/` | The system and its 433 tests |
 | `data/life_admin_sample.csv` | A 5,000-policy synthetic extract, so there is something to load |
 | `docs/` | Architecture, data model, and the console operator guide |
-| `install.cmd` `verify.cmd` `start.cmd` `worker.cmd` `stop.cmd` | What you run |
+| `install.cmd` `verify.cmd` `start.cmd` `worker.cmd` `stop.cmd` `status.cmd` | What you run |
 
 Nothing here reaches the network. The installer runs `pip --no-index`, which
 makes that a guarantee rather than a promise: pip is forbidden from consulting
@@ -92,8 +92,20 @@ That skips the test suite and finishes in well under a minute.
 | 5 or 6, the pipeline | Task Manager: `postgres.exe` should be busy. 5,000 policies is real work |
 | 9, the tests | Normal. Use `--quick` if you do not need it |
 
-`python -m cmdm.embedded status` reports whether the server is initialised and
-running, from another Command Prompt.
+From another Command Prompt in the bundle folder:
+
+```
+status.cmd
+```
+
+reports whether the server is initialised, running and on which port, and
+prints the tail of `pgdata\server.log`.
+
+Note that plain `python` is *not* the interpreter the system runs under — the
+install puts everything in `.venv\`, so a bare `python -m cmdm.embedded` will
+say the module does not exist. `status.cmd` and the other `.cmd` scripts use
+the right one; to do it by hand it is
+`.venv\Scripts\python -m cmdm.embedded status`.
 
 ---
 

@@ -42,6 +42,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 
@@ -142,11 +143,50 @@ def _environment() -> dict[str, str]:
     return env
 
 
-def _run(program: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    program: str, *args: str, check: bool = True, timeout: float = 120.0
+) -> subprocess.CompletedProcess:
+    """Run one PostgreSQL binary and return its output.
+
+    Output goes to temporary *files*, never to pipes, and this is the whole
+    reason the function exists rather than a bare ``subprocess.run``.
+
+    ``pg_ctl start`` launches the postmaster and returns, but the postmaster is
+    a child that inherits whatever handles it was given and keeps them for its
+    entire life. Give it the write end of a pipe -- which ``capture_output``
+    does -- and the parent waits for an end-of-file that will not arrive until
+    the database shuts down. The server starts perfectly and the caller hangs
+    forever, which is indistinguishable from a server that failed to start.
+
+    A file handle inherited the same way is harmless: nothing waits on it, and
+    the contents are read back after the process exits.
+    """
     executable = binaries() / f"{program}{EXE}"
-    result = subprocess.run(
-        [str(executable), *args], capture_output=True, text=True, env=_environment(),
-    )
+
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out, \
+         tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
+        try:
+            completed = subprocess.run(
+                [str(executable), *args],
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                env=_environment(),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            out.seek(0)
+            err.seek(0)
+            raise RuntimeError(
+                f"{program} did not finish within {timeout:.0f}s.\n"
+                f"{out.read().strip()}\n{err.read().strip()}".strip()
+            ) from None
+        out.seek(0)
+        err.seek(0)
+        result = subprocess.CompletedProcess(
+            completed.args, completed.returncode, out.read(), err.read()
+        )
+
     if check and result.returncode != 0:
         raise RuntimeError(
             f"{program} failed (exit {result.returncode})\n"
@@ -225,13 +265,44 @@ def _is_running() -> bool:
     return result.returncode == 0
 
 
+def _running_port() -> int | None:
+    """The port of a server that is already up.
+
+    Read from the port file, and failing that from ``postmaster.pid``, whose
+    fourth line PostgreSQL writes for exactly this purpose. The fallback is not
+    theoretical: an interrupted start leaves a running server and no port file,
+    and without this the next attempt tries to start a second one on top of it
+    and fails with "another server might be running" -- blaming the operator
+    for a state the previous run created.
+    """
+    if not _is_running():
+        return None
+
+    if _port_file().exists():
+        try:
+            return int(_port_file().read_text(encoding="utf-8").strip())
+        except ValueError:
+            pass
+
+    pid_file = data_dir() / "postmaster.pid"
+    try:
+        lines = pid_file.read_text(encoding="utf-8").splitlines()
+        port = int(lines[3].strip())
+    except (OSError, IndexError, ValueError):
+        return None
+
+    _port_file().write_text(str(port), encoding="utf-8")
+    return port
+
+
 def ensure_running() -> int:
     """Start the server if it is not up. Returns the port it is listening on."""
     _initialise()
     target = data_dir()
 
-    if _is_running() and _port_file().exists():
-        return int(_port_file().read_text(encoding="utf-8").strip())
+    already = _running_port()
+    if already is not None:
+        return already
 
     port = _free_port()
     options = f"-p {port} -h 127.0.0.1"
@@ -335,9 +406,9 @@ def status() -> dict[str, object]:
         "data_dir": str(target),
         "initialised": (target / "PG_VERSION").exists(),
         "running": _is_running(),
-        "port": _port_file().read_text(encoding="utf-8").strip()
-        if _port_file().exists()
-        else None,
+        # Via _running_port so an interrupted start, which leaves a server up
+        # and no port file, still reports the port it is actually on.
+        "port": _running_port(),
     }
 
 
