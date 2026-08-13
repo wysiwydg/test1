@@ -112,6 +112,36 @@ def _checksums(staging: pathlib.Path) -> None:
     print(f"checksummed {len(rows)} files")
 
 
+def split(archive: pathlib.Path, chunk_mib: int = 24) -> list[pathlib.Path]:
+    """Cut the archive into transferable parts, beside it.
+
+    Most transfer paths cap an attachment well below the size of a bundle that
+    carries a database engine, so the split is part of building it rather than
+    something to improvise later. ``offline/rejoin.py`` puts it back and checks
+    the result against MANIFEST-level SHA-256.
+    """
+    parts_dir = archive.parent / "parts"
+    parts_dir.mkdir(exist_ok=True)
+    for stale in parts_dir.glob(f"{archive.name}.*"):
+        stale.unlink()
+
+    data = archive.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    chunk = chunk_mib * 1024 * 1024
+    written = []
+    for index in range(0, len(data), chunk):
+        part = parts_dir / f"{archive.name}.{index // chunk + 1:03d}"
+        part.write_bytes(data[index:index + chunk])
+        written.append(part)
+
+    (parts_dir / "SHA256.txt").write_text(
+        f"{digest}  {archive.name}\n", encoding="utf-8"
+    )
+    shutil.copy2(REPO / "offline" / "rejoin.py", parts_dir / "rejoin.py")
+    print(f"split into {len(written)} parts of <= {chunk_mib} MiB in {parts_dir}")
+    return written
+
+
 def _zip(staging: pathlib.Path, out_dir: pathlib.Path) -> pathlib.Path:
     archive = out_dir / f"{staging.name}.zip"
     archive.unlink(missing_ok=True)
@@ -141,11 +171,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--python", default="3.11", help="target Python, e.g. 3.11")
     parser.add_argument("--out", default="dist", help="where to write the bundle")
+    parser.add_argument(
+        "--split", type=int, metavar="MIB", default=0,
+        help="also cut the zip into parts of at most MIB megabytes",
+    )
     args = parser.parse_args(argv)
 
     out_dir = (REPO / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    build(args.platform, args.python, out_dir)
+    archive = build(args.platform, args.python, out_dir)
+    if args.split:
+        split(archive, chunk_mib=args.split)
     return 0
 
 
