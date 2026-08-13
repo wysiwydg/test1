@@ -10,19 +10,25 @@ answer there.
     python -m cmdm.embedded stop
     python -m cmdm.embedded status
 
+It drives the real ``initdb`` and ``pg_ctl`` as subprocesses rather than
+wrapping them in a Python extension. That is not a stylistic choice: a database
+engine has nothing to do with CPython's ABI, and binding it to one means the
+whole system inherits whatever Python versions somebody else's wheel happened to
+be built for. Shipping the binaries and calling them keeps the server usable on
+any interpreter.
+
 It is a real PostgreSQL server -- the same binaries, the same version -- run out
 of a directory rather than installed system-wide. Nothing about the golden store
 is weakened: the schema, the ``FOR UPDATE SKIP LOCKED`` queue, the partial
-unique indexes and the enum types are all exactly what they are against a
-system instance. Only the lifecycle differs.
+unique indexes and the enum types are all exactly what they are against a system
+instance. Only the lifecycle differs.
 
 **It does not take over.** ``CMDM_DSN`` always wins. A deployment with its own
-instance sets that variable and this module is never imported, which is why
-``pgserver`` is an optional dependency rather than a required one.
+instance sets that variable and none of this runs.
 
 The data directory defaults to ``./pgdata`` under :data:`CMDM_HOME`, so an
 operator can see it, back it up, and delete it to start over -- rather than it
-living somewhere under a temp directory that the next reboot clears.
+living under a temp directory that the next reboot clears.
 """
 
 from __future__ import annotations
@@ -30,18 +36,41 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import platform
+import secrets
+import shutil
+import socket
+import subprocess
 import sys
+import time
 from collections.abc import Sequence
 
-__all__ = ["data_dir", "ensure_running", "ensure_dsn", "stop", "status", "main"]
+__all__ = [
+    "binaries",
+    "data_dir",
+    "ensure_running",
+    "ensure_dsn",
+    "stop",
+    "status",
+    "main",
+]
 
-#: Where the embedded instance keeps its data. Overridable, and deliberately a
-#: visible path rather than a temp directory: this is the golden store.
 HOME_ENV = "CMDM_HOME"
 DATA_DIR_ENV = "CMDM_PGDATA"
+BIN_ENV = "CMDM_PG_BIN"
 
 #: The database the schema is applied to inside the embedded instance.
 DATABASE = "cmdm"
+
+#: How long to wait for the server to accept connections after pg_ctl returns.
+START_TIMEOUT_SECONDS = 30.0
+
+WINDOWS = platform.system() == "Windows"
+EXE = ".exe" if WINDOWS else ""
+
+
+class EmbeddedPostgresUnavailable(RuntimeError):
+    """No PostgreSQL binaries could be found to run."""
 
 
 def home() -> pathlib.Path:
@@ -53,31 +82,211 @@ def data_dir() -> pathlib.Path:
     return pathlib.Path(override).resolve() if override else home() / "pgdata"
 
 
-def _server(cleanup_mode: str | None = None):
-    """Get the pgserver handle, initialising and starting on first use.
+def binaries() -> pathlib.Path:
+    """Locate ``initdb`` and ``pg_ctl``.
 
-    ``cleanup_mode=None`` deliberately: the default stops the server when the
-    process that started it exits, which is wrong here. The API server and the
-    worker are separate processes sharing one database, and whichever happened
-    to start it would take the database down with it when it stopped.
+    Four places, most explicit first. The offline bundle ships ``pgsql/bin``
+    beside itself; a developer machine usually has ``pgserver`` installed from
+    PyPI; and a machine with PostgreSQL already installed has them on PATH.
     """
+    override = os.environ.get(BIN_ENV)
+    if override:
+        candidate = pathlib.Path(override).resolve()
+        if (candidate / f"initdb{EXE}").exists():
+            return candidate
+        raise EmbeddedPostgresUnavailable(
+            f"{BIN_ENV} is set to {candidate}, which contains no initdb{EXE}"
+        )
+
+    bundled = home() / "pgsql" / "bin"
+    if (bundled / f"initdb{EXE}").exists():
+        return bundled
+
     try:
         import pgserver
-    except ImportError:  # pragma: no cover - depends on install extras
+
+        vendored = pathlib.Path(pgserver.__file__).parent / "pginstall" / "bin"
+        if (vendored / f"initdb{EXE}").exists():
+            return vendored
+    except ImportError:
+        pass
+
+    found = shutil.which("initdb")
+    if found:
+        return pathlib.Path(found).resolve().parent
+
+    raise EmbeddedPostgresUnavailable(
+        "no PostgreSQL binaries found. The offline bundle ships them in "
+        f"pgsql/bin; otherwise set {BIN_ENV} to a directory containing "
+        f"initdb{EXE} and pg_ctl{EXE}, or point CMDM_DSN at a PostgreSQL "
+        "instance you already have."
+    )
+
+
+def _environment() -> dict[str, str]:
+    """The environment the PostgreSQL binaries run under.
+
+    On Windows the DLLs sit beside the executables and this is a no-op. On
+    other platforms the shared libraries are one directory over, and a copied
+    installation that does not say so fails with "error while loading shared
+    libraries" -- which names a library rather than the missing search path,
+    and sends the reader after the wrong thing.
+    """
+    env = dict(os.environ)
+    if WINDOWS:
+        return env
+    lib = binaries().parent / "lib"
+    if lib.is_dir():
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{lib}{os.pathsep}{existing}" if existing else str(lib)
+    return env
+
+
+def _run(program: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    executable = binaries() / f"{program}{EXE}"
+    result = subprocess.run(
+        [str(executable), *args], capture_output=True, text=True, env=_environment(),
+    )
+    if check and result.returncode != 0:
         raise RuntimeError(
-            "the embedded PostgreSQL is not installed. Either install it "
-            "(pip install 'cmdm[embedded]') or point CMDM_DSN at a PostgreSQL "
-            "instance you already have."
-        ) from None
+            f"{program} failed (exit {result.returncode})\n"
+            f"{result.stdout.strip()}\n{result.stderr.strip()}".strip()
+        )
+    return result
 
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _port_file() -> pathlib.Path:
+    return data_dir() / "cmdm_port"
+
+
+def _password_file() -> pathlib.Path:
+    # Beside the data directory rather than inside it, so that deleting pgdata
+    # to start over does not leave a password behind that matches nothing.
+    return data_dir().parent / "pgpassword"
+
+
+def _initialise() -> None:
+    """Create the cluster, if it is not already there."""
     target = data_dir()
+    if (target / "PG_VERSION").exists():
+        return
+
+    if not WINDOWS and hasattr(os, "geteuid") and os.geteuid() == 0:
+        # PostgreSQL refuses to initialise a cluster as root, and says so in a
+        # way that reads as a bug in this program rather than a deliberate
+        # refusal by initdb. Windows is unaffected: pg_ctl there starts the
+        # server under a restricted token by itself.
+        raise EmbeddedPostgresUnavailable(
+            "PostgreSQL will not create a data directory as root, and this "
+            "process is running as root. Run it as an ordinary user, or set "
+            "CMDM_DSN to point at a PostgreSQL instance you already have."
+        )
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    return pgserver.get_server(target, cleanup_mode=cleanup_mode)
+
+    # Windows has no Unix sockets, so the server is reachable over TCP, and
+    # trust authentication there would let any local account read the whole
+    # customer book. A generated password costs nothing and closes that.
+    password = secrets.token_urlsafe(24)
+    pwfile = _password_file()
+    pwfile.write_text(password, encoding="utf-8")
+    if not WINDOWS:
+        pwfile.chmod(0o600)
+
+    try:
+        _run(
+            "initdb",
+            "-D", str(target),
+            "-U", "postgres",
+            "--encoding=UTF8",
+            "--locale=C",
+            "--auth-local=trust",
+            "--auth-host=scram-sha-256",
+            f"--pwfile={pwfile}",
+        )
+    except Exception:
+        # A half-initialised directory makes every later run fail with
+        # "directory is not empty" instead of retrying, so it does not survive
+        # a failure.
+        shutil.rmtree(target, ignore_errors=True)
+        raise
 
 
-def ensure_running() -> str:
-    """Start the embedded server if it is not up, and return its base URI."""
-    return _server().get_uri()
+def _is_running() -> bool:
+    if not (data_dir() / "postmaster.pid").exists():
+        return False
+    result = _run("pg_ctl", "-D", str(data_dir()), "status", check=False)
+    return result.returncode == 0
+
+
+def ensure_running() -> int:
+    """Start the server if it is not up. Returns the port it is listening on."""
+    _initialise()
+    target = data_dir()
+
+    if _is_running() and _port_file().exists():
+        return int(_port_file().read_text(encoding="utf-8").strip())
+
+    port = _free_port()
+    options = f"-p {port} -h 127.0.0.1"
+    if not WINDOWS:
+        # A socket in the data directory keeps a local instance off TCP
+        # entirely, which Windows cannot do.
+        options += f" -k {target}"
+
+    _run(
+        "pg_ctl",
+        "-D", str(target),
+        "-l", str(target / "server.log"),
+        "-o", options,
+        "-w",                      # wait for it to accept connections
+        "start",
+    )
+    _port_file().write_text(str(port), encoding="utf-8")
+    _await_ready(port)
+    return port
+
+
+def _await_ready(port: int) -> None:
+    """``pg_ctl -w`` usually suffices; this covers the case where it does not.
+
+    A server that is up but not yet accepting connections produces a confusing
+    failure several frames away, in whatever tried to connect first.
+    """
+    deadline = time.monotonic() + START_TIMEOUT_SECONDS
+    last = ""
+    while time.monotonic() < deadline:
+        result = _run(
+            "pg_isready", "-h", "127.0.0.1", "-p", str(port), "-q", check=False
+        )
+        if result.returncode == 0:
+            return
+        last = (result.stderr or result.stdout).strip()
+        time.sleep(0.25)
+    log = data_dir() / "server.log"
+    detail = log.read_text(encoding="utf-8", errors="replace")[-1500:] if log.exists() else ""
+    raise RuntimeError(
+        f"the embedded PostgreSQL did not accept connections within "
+        f"{START_TIMEOUT_SECONDS:.0f}s. {last}\n{detail}"
+    )
+
+
+def base_dsn(port: int, database: str = "postgres") -> str:
+    password = _password_file()
+    parts = [f"port={port}", "user=postgres", f"dbname={database}"]
+    if WINDOWS:
+        parts.append("host=127.0.0.1")
+        if password.exists():
+            parts.append(f"password={password.read_text(encoding='utf-8').strip()}")
+    else:
+        parts.append(f"host={data_dir()}")
+    return " ".join(parts)
 
 
 def ensure_dsn() -> str:
@@ -90,46 +299,45 @@ def ensure_dsn() -> str:
     if existing:
         return existing
 
-    server = _server()
-    base = server.get_uri()
+    port = ensure_running()
 
-    # `psycopg` is a hard dependency of the store extra, and this module is only
-    # reached by something that is about to connect.
     import psycopg
 
-    with psycopg.connect(base, autocommit=True) as conn:
+    with psycopg.connect(base_dsn(port), autocommit=True) as conn:
         exists = conn.execute(
             "SELECT 1 FROM pg_database WHERE datname = %s", (DATABASE,)
         ).fetchone()
         if not exists:
-            # Identifier interpolated rather than parameterised because CREATE
-            # DATABASE takes no parameters; DATABASE is a module constant, not
-            # anything a caller supplies.
+            # Identifier interpolated because CREATE DATABASE takes no
+            # parameters; DATABASE is a module constant, not caller input.
             conn.execute(f'CREATE DATABASE "{DATABASE}"')
 
-    return server.get_uri(database=DATABASE)
+    return base_dsn(port, DATABASE)
 
 
 def stop() -> None:
-    """Stop the embedded server, leaving its data directory intact."""
-    try:
-        import pgserver
-    except ImportError:  # pragma: no cover
+    """Stop the server, leaving its data directory intact."""
+    if not (data_dir() / "postmaster.pid").exists():
         return
-    target = data_dir()
-    if not (target / "postmaster.pid").exists():
-        return
-    server = pgserver.get_server(target, cleanup_mode=None)
-    server.cleanup()
+    _run("pg_ctl", "-D", str(data_dir()), "-m", "fast", "-w", "stop", check=False)
+    _port_file().unlink(missing_ok=True)
 
 
 def status() -> dict[str, object]:
     """Whether the embedded instance exists and is running."""
     target = data_dir()
+    try:
+        where: object = str(binaries())
+    except EmbeddedPostgresUnavailable as exc:
+        where = f"not found ({exc})"
     return {
+        "binaries": where,
         "data_dir": str(target),
         "initialised": (target / "PG_VERSION").exists(),
-        "running": (target / "postmaster.pid").exists(),
+        "running": _is_running(),
+        "port": _port_file().read_text(encoding="utf-8").strip()
+        if _port_file().exists()
+        else None,
     }
 
 
@@ -159,7 +367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         #   for /f %i in ('python -m cmdm.embedded dsn') do set CMDM_DSN=%i
         print(dsn)
     else:
-        print(f"started\ndata_dir: {data_dir()}\nCMDM_DSN={dsn}", file=sys.stderr)
+        print(f"started\ndata_dir: {data_dir()}", file=sys.stderr)
         print(dsn)
     return 0
 

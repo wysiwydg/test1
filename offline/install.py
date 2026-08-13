@@ -15,7 +15,6 @@ other scripts to read.
 from __future__ import annotations
 
 import base64
-import os
 import pathlib
 import platform
 import secrets
@@ -26,12 +25,13 @@ HERE = pathlib.Path(__file__).resolve().parent
 WHEELS = HERE / "wheels"
 VENV = HERE / ".venv"
 
-#: Wheels are compiled per interpreter version. Installing under anything else
-#: fails with "no matching distribution", which is a confusing way to learn that
-#: the bundle was built for a different Python.
-SUPPORTED = {(3, 11)}
+#: Wheels are compiled per interpreter version, so a bundle is built for one.
+#: The set here is what this build *could* be; BUILT_FOR below is what it is.
+#: Installing under anything else fails with "no matching distribution", which
+#: is a confusing way to learn the bundle was built for a different Python.
+SUPPORTED = {(3, 11), (3, 12), (3, 13)}
 
-TOP_LEVEL = ["cmdm[vector,store,api,embedded]", "pytest", "httpx", "pglast"]
+TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
 
 
 def say(message: str) -> None:

@@ -29,7 +29,18 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: duplicated from them -- these are the top-level names, and pip resolves the
 #: rest -- plus what the test suite needs, because a bundle you cannot verify on
 #: arrival is a bundle you have to trust.
-TOP_LEVEL = ["cmdm[vector,store,api,embedded]", "pytest", "httpx", "pglast"]
+TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
+
+#: PostgreSQL itself, shipped as plain files rather than as a wheel.
+#:
+#: pgserver publishes the same binaries as a Python package, but only for
+#: CPython 3.9-3.12 -- so depending on it would cap the whole system at 3.12 on
+#: account of a database engine that does not care what interpreter is running.
+#: The binaries are extracted from whichever wheel exists and installed as
+#: `pgsql/`, where cmdm.embedded looks for them. On Windows every DLL lives
+#: inside that tree, so it is self-contained.
+PGSERVER_VERSION = "0.1.4"
+PGSERVER_BUILD_PYTHON = "3.12"
 
 #: Copied verbatim into the bundle. The source tree ships alongside the wheel so
 #: the tests can run on the target and an operator can read what they are about
@@ -59,6 +70,8 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
         *(dep for spec in TOP_LEVEL for dep in _requirements(spec)),
     ])
 
+    _postgres_binaries(staging, platform, python)
+
     print("building the cmdm wheel")
     run([sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(wheels)])
 
@@ -79,6 +92,49 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
 
     _checksums(staging)
     return _zip(staging, out_dir)
+
+
+def _postgres_binaries(staging: pathlib.Path, platform: str, python: str) -> None:
+    """Unpack a PostgreSQL installation into the bundle as ``pgsql/``."""
+    import tempfile
+
+    print("fetching PostgreSQL binaries")
+    with tempfile.TemporaryDirectory() as scratch:
+        # The binaries are native and identical across the wheel's Python tags,
+        # so the wheel is fetched for whatever tag exists rather than for the
+        # target interpreter -- which may have no pgserver wheel at all.
+        build_python = python if _pgserver_supports(python) else PGSERVER_BUILD_PYTHON
+        abi = f"cp{build_python.replace('.', '')}"
+        run([
+            sys.executable, "-m", "pip", "download", "--dest", scratch, "--no-deps",
+            "--only-binary=:all:", "--platform", platform,
+            "--python-version", build_python, "--implementation", "cp", "--abi", abi,
+            f"pgserver=={PGSERVER_VERSION}",
+        ])
+        wheel = next(pathlib.Path(scratch).glob("pgserver-*.whl"))
+        target = staging / "pgsql"
+        with zipfile.ZipFile(wheel) as z:
+            members = [n for n in z.namelist() if n.startswith("pgserver/pginstall/")]
+            for name in members:
+                relative = name[len("pgserver/pginstall/"):]
+                if not relative:
+                    continue
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if name.endswith("/"):
+                    continue
+                destination.write_bytes(z.read(name))
+                # initdb and pg_ctl have to be runnable; zip carries no mode.
+                if "/bin/" in name or destination.suffix in ("", ".sh"):
+                    destination.chmod(0o755)
+        count = sum(1 for _ in target.rglob("*"))
+        size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+        print(f"  pgsql/ {count} files, {size / 1e6:.0f} MB")
+
+
+def _pgserver_supports(python: str) -> bool:
+    major, minor = (int(part) for part in python.split(".")[:2])
+    return (major, minor) <= (3, 12)
 
 
 def _requirements(spec: str) -> list[str]:

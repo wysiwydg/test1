@@ -2,7 +2,7 @@
 
 Everything needed to run this on a Windows machine with **no internet**, **no
 database** and **no Python packages installed**. The only prerequisite is
-CPython 3.11.
+**CPython 3.13**.
 
 ---
 
@@ -10,7 +10,8 @@ CPython 3.11.
 
 | | |
 |---|---|
-| `wheels/` | 36 pre-compiled Python packages, **all `win_amd64` / cp311** — including PostgreSQL 16.2 itself |
+| `wheels/` | 33 pre-compiled Python packages, all `win_amd64` / cp313 |
+| `pgsql/` | **PostgreSQL 16.2 for Windows** — the real server, 41 MB of binaries and DLLs |
 | `src/`, `tests/`, `scripts/` | The system and its 433 tests |
 | `data/life_admin_sample.csv` | A 5,000-policy synthetic extract, so there is something to load |
 | `docs/` | Architecture, data model, and the console operator guide |
@@ -121,11 +122,17 @@ The full walkthrough of each console is in
 | | |
 |---|---|
 | `pgdata\` | The PostgreSQL data directory — **this is the golden store** |
+| `pgpassword` | The generated superuser password for that instance |
 | `config.cmd` | The identifier-hashing key |
 | `.venv\` | The installed packages |
 
-Back up `pgdata\` and `config.cmd` together; either alone is not enough. To
-start completely over, stop the server and delete `pgdata\`.
+Back up `pgdata\`, `pgpassword` and `config.cmd` together; any one alone is
+not enough. To start completely over, stop the server and delete `pgdata\`.
+
+Windows has no Unix sockets, so the server listens on `127.0.0.1` on a port
+chosen at first start and recorded in `pgdata\cmdm_port`. It is not reachable
+from another machine, and a password is generated at `initdb` time rather than
+trusting every local account, which `trust` on a TCP socket would.
 
 The database is a real PostgreSQL 16.2 server, just run out of a folder instead
 of installed system-wide. Nothing about the golden store is weakened by that —
@@ -149,9 +156,11 @@ has no database, not a layer in front of one that does.
 
 ## If something goes wrong
 
-**"this bundle contains wheels for Python 3.11 only"** — the compiled packages
-cannot be used across Python versions. Install CPython 3.11, or ask for a
-bundle rebuilt for the version you have.
+**"this bundle contains wheels for Python 3.13 only"** — the compiled packages
+cannot be used across Python versions. Run it with CPython 3.13, or ask for a
+bundle rebuilt for the version you have. PostgreSQL is unaffected either way:
+it ships as plain executables in `pgsql/` and does not care which interpreter
+is running.
 
 **`install.cmd` cannot create a virtual environment** — some minimal or
 Store-installed Pythons omit `venv`. Install CPython from python.org, or install
@@ -199,15 +208,22 @@ Built on Linux, so the honest split is:
 
 **Verified by execution**, on the identical code and the identical scripts with
 a Linux wheel set: the installer, the verifier, the embedded PostgreSQL
-lifecycle, migrations, the 5,000-policy pipeline, idempotent re-processing, the
+lifecycle (initdb, start, connect, restart, stop), migrations, the
+5,000-policy pipeline, idempotent re-processing, the
 API, all console pages, the launcher chain (`start.sh` → live server → sign-in →
 `worker.sh`), and all 433 tests.
 
+**Verified by execution under Python 3.13**: the same bundle built for
+Linux/cp313, installed and run with `/usr/bin/python3.13` — all nine checks
+pass, including the full 433-test suite. The code is 3.13-clean; only the
+platform differs.
+
 **Verified by resolution**, for Windows specifically: `pip install --no-index
---find-links wheels --platform win_amd64 --python-version 3.11` resolves and
-unpacks the complete dependency closure with no network — 36 packages, 156
-Windows `.pyd` extension modules, zero Linux `.so` files, and PostgreSQL 16.2's
-`postgres.exe`. Nothing is missing and nothing is the wrong platform.
+--find-links wheels --platform win_amd64 --python-version 3.13` resolves and
+unpacks the complete dependency closure with no network — 33 packages, 151
+Windows `.pyd` extension modules, zero Linux `.so` files. `pgsql/` holds
+`initdb.exe`, `pg_ctl.exe`, `pg_isready.exe` and 38 DLLs, all inside that one
+tree.
 
 **Not verified**: execution of Windows binaries, which cannot be done from
 Linux. That is what `verify.cmd` is for, and why it runs the real system rather

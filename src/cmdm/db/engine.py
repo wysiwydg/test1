@@ -77,13 +77,14 @@ def _embedded_dsn() -> str | None:
     run in the same shell all resolve to the same instance without each paying
     the start-up check.
     """
-    try:
-        from cmdm.embedded import ensure_dsn
-    except ImportError:  # pragma: no cover - embedded extra not installed
-        return None
+    from cmdm.embedded import EmbeddedPostgresUnavailable, ensure_dsn
+
     try:
         dsn = ensure_dsn()
-    except RuntimeError:
+    except EmbeddedPostgresUnavailable:
+        # No binaries to run. Fall through to the PG* defaults, which will
+        # produce a connection error naming a host -- clearer than a message
+        # about an embedded server the deployment never asked for.
         return None
     os.environ["CMDM_DSN"] = dsn
     return dsn

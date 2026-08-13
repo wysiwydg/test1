@@ -49,10 +49,16 @@ api = [
     "prometheus-client>=0.20",
 ]
 
-# Self-contained PostgreSQL, for a machine that has none and may not install
-# one. Optional: a deployment with its own instance sets CMDM_DSN and skips it.
+# A convenient way to get PostgreSQL binaries onto a development machine.
+#
+# NOT how the offline bundle does it. pgserver publishes wheels only for
+# CPython 3.9-3.12, and a database engine has no business constraining which
+# interpreter the system runs on -- so the bundle ships the PostgreSQL
+# installation as plain files and cmdm.embedded drives initdb and pg_ctl
+# directly. This extra exists because `pip install` is still the easiest way to
+# obtain those files when you do have an index.
 embedded = [
-    "pgserver>=0.1.4",
+    "pgserver>=0.1.4; python_version < '3.13'",
 ]
 
 # Local open-source models for the fallback path, invoked only on the undecided
@@ -72,7 +78,7 @@ dev = [
 
 # Everything the system actually needs to run.
 all = [
-    "cmdm[vector,store,api,embedded]",
+    "cmdm[vector,store,api]",
 ]
 
 [tool.hatch.build.targets.wheel]
