@@ -52,7 +52,9 @@ PASSTHROUGH_COLUMNS = ("source_record_id",)
 #: party itself. They belong on the Relationship edge; carrying them on a
 #: collapsed Person row would assert something untrue, since a party holds
 #: different roles on different policies.
-POLICY_SCOPED_COLUMNS = ("role", "role_sequence", "policy_number_normalized")
+POLICY_SCOPED_COLUMNS = (
+    "role", "role_sequence", "policy_number_normalized", "stated_relationship",
+)
 
 
 def _passthrough(raw: pl.LazyFrame) -> list[pl.Expr]:
@@ -152,6 +154,19 @@ def _party_frame(
     """
     exprs = [_apply_transform(fm, mapping) for fm in party.fields]
 
+    # What the source said about this party's relation to the life insured.
+    # Upper-cased and trimmed but otherwise kept verbatim: the vocabulary is the
+    # source's, and mapping it to ours here would lose the distinction between a
+    # value we did not recognise and one the source left blank.
+    if party.relationship_field and party.relationship_field in raw.collect_schema().names():
+        stated = (
+            pl.col(party.relationship_field).cast(pl.String, strict=False)
+            .str.strip_chars().str.to_uppercase()
+        )
+        stated = pl.when(stated.str.len_chars() > 0).then(stated).otherwise(None)
+    else:
+        stated = pl.lit(None, dtype=pl.String)
+
     frame = raw.select(
         *exprs,
         *_passthrough(raw),
@@ -160,6 +175,7 @@ def _party_frame(
         pl.lit(party.key_kind).alias("source_key_kind"),
         pl.lit(party.role.value).alias("role"),
         pl.lit(party.role_sequence, dtype=pl.Int16).alias("role_sequence"),
+        stated.alias("stated_relationship"),
         pl.lit(mapping.source_system).alias("source_system"),
         N.normalize_policy_number(
             pl.col(_policy_number_source(mapping)).cast(pl.String, strict=False)
@@ -373,6 +389,7 @@ def shred_relationships(parties: pl.LazyFrame, mapping: SourceMapping) -> pl.Laz
         pl.col("policy_number_normalized"),
         pl.col("role"),
         pl.col("role_sequence"),
+        pl.col("stated_relationship"),
         pl.col("source_system"),
         pl.col("full_name_normalized"),
     )

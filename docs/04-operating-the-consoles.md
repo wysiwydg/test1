@@ -190,6 +190,26 @@ so on the page rather than being shown blanks and left to wonder.
 
 **`/console/person/{id}`** — one golden record, and on the same page:
 
+- **Household and connections** — who this party lives with as a family, how
+  each of them is related, and on how many policies that rests. Below it,
+  **Belongs to**: the companies, trusts and estates the party is linked to.
+
+  The two are separate on purpose. A household is a family; an affiliation is a
+  legal entity. A company insuring forty staff is not a household of forty-one,
+  and merging the two is the standard way this feature produces nonsense.
+
+  Households are built from what the source *stated* — insurable interest is a
+  condition of issue, so a life admin system records at application that the
+  owner is the insured's spouse, parent or child. They are **not** built from
+  shared addresses. Two people at one postcode are two people: the sample
+  extract contains flatmates who share an address with a family and belong to
+  no household, and spouses who kept their own surname and belong to one.
+  Address is used only to corroborate, never to admit a member.
+
+  Membership is transitive over stated relations, so a member two steps away is
+  in the household without any edge naming the relation directly. Those members
+  are listed as "same household" rather than with a guessed relationship.
+
 - **Contributing sources** — every source key that resolves to this person.
 - **Why these values** — per contested attribute: the surviving value, the rule
   that selected it, the source that won and how many candidates there were.
@@ -207,11 +227,20 @@ breakdowns that say what kind of book this is: roles on the edge, policy status,
 party type. Below that a browser over any of the three, fifty rows a page.
 
 The three entities are not three views of the same thing. **Policy** is the
-grain the data arrives in. **Person** is what resolution collapses it to — 5,000
-policies in the sample carry 3,881 distinct source identities, which resolve to
-2,712 people. **Relationship** is the role-bearing edge: 15,000 of them, one per
-party per policy, and the reason `role` is an attribute of an edge rather than
-three columns on Policy.
+grain the data arrives in. **Person** is what resolution collapses it to.
+**Relationship** is the role-bearing edge: 15,000 sourced ones in the sample,
+one per party per policy, and the reason `role` is an attribute of an edge
+rather than three columns on Policy — plus the derived party-to-party edges the
+householding pass adds on top.
+
+The **Household** section counts what the sources say about who lives with whom:
+households, how many parties are in one, the largest, and how many parties are
+linked to a company, trust or estate. Measured on the 5,000-policy sample
+against the generator's own ground truth: 598 households derived, every one of
+them a single real family, no flatmate wrongly included, and 80% of the real
+families of two or more found intact. The 20% not found are families whose
+members never appear together on a policy with a stated relationship — no
+evidence, no household, which is the right answer rather than a guess.
 
 The browser masks personal fields for a role without `UNMASK`, exactly as search
 and export do. A page that showed what the other two withhold would be the way

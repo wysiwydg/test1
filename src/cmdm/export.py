@@ -84,6 +84,18 @@ def entity_overview(conn: psycopg.Connection) -> dict[str, Any]:
                   AS multi_source_persons,
               (SELECT count(*) FROM mdm.person WHERE version > 1 AND is_current)
                   AS revised_persons,
+              (SELECT count(DISTINCT household_id) FROM mdm.person
+                WHERE is_current AND household_id IS NOT NULL) AS households,
+              (SELECT count(*) FROM mdm.person
+                WHERE is_current AND household_id IS NOT NULL)
+                  AS persons_in_a_household,
+              (SELECT coalesce(max(household_size), 0) FROM mdm.person
+                WHERE is_current) AS largest_household,
+              (SELECT count(*) FROM mdm.person
+                WHERE is_current AND affiliation_count > 0) AS affiliated_persons,
+              (SELECT count(*) FROM mdm.relationship
+                WHERE is_current AND edge_kind = 'PARTY_PARTY')
+                  AS derived_edges,
               (SELECT count(*) FROM mdm.policy WHERE is_current) AS policies,
               (SELECT count(DISTINCT source_system) FROM mdm.policy WHERE is_current)
                   AS policy_sources,
@@ -113,6 +125,21 @@ def entity_overview(conn: psycopg.Connection) -> dict[str, Any]:
         )
         totals["by_party_type"] = [dict(r) for r in cur.fetchall()]
 
+        cur.execute(
+            "SELECT association_type, count(*) AS n FROM mdm.relationship "
+            "WHERE is_current AND edge_kind = 'PARTY_PARTY' "
+            "AND association_type IS NOT NULL "
+            "GROUP BY association_type ORDER BY n DESC"
+        )
+        totals["by_association"] = [dict(r) for r in cur.fetchall()]
+
+        cur.execute(
+            "SELECT household_size, count(DISTINCT household_id) AS n "
+            "FROM mdm.person WHERE is_current AND household_id IS NOT NULL "
+            "GROUP BY household_size ORDER BY household_size"
+        )
+        totals["by_household_size"] = [dict(r) for r in cur.fetchall()]
+
     return totals
 
 
@@ -131,8 +158,8 @@ def _display_columns(entity: str) -> list[str]:
     chosen = {
         "person": [
             "person_id", "full_name", "party_type", "date_of_birth",
-            "email_address", "phone_e164", "postal_code", "country_code",
-            "source_count", "version",
+            "email_address", "phone_e164", "postal_code",
+            "household_size", "affiliation_count", "version",
         ],
         "policy": [
             "policy_id", "policy_number", "source_system", "product_name",
@@ -140,9 +167,9 @@ def _display_columns(entity: str) -> list[str]:
             "annual_premium_amount", "premium_frequency", "version",
         ],
         "relationship": [
-            "relationship_id", "edge_kind", "role", "from_person_id",
-            "to_policy_id", "source_system", "source_party_key",
-            "evidence_count", "derivation_method", "version",
+            "relationship_id", "edge_kind", "role", "association_type",
+            "stated_relationship", "from_person_id", "to_policy_id",
+            "to_person_id", "evidence_count", "source_system",
         ],
     }[entity]
 

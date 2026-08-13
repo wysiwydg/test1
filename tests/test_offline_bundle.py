@@ -116,10 +116,15 @@ def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:
     that overwrote either would destroy the installation it was fixing."""
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location(
-        "cmdm_update", pathlib.Path(__file__).resolve().parent.parent
-        / "offline" / "update.py"
-    )
+    # In the repository the script lives under offline/; in an installed bundle
+    # it sits at the root beside verify.py, and the bundle runs this same suite.
+    root = pathlib.Path(__file__).resolve().parent.parent
+    candidates = [root / "offline" / "update.py", root / "update.py"]
+    source = next((c for c in candidates if c.exists()), None)
+    if source is None:  # pragma: no cover - neither layout
+        pytest.skip("update.py not present in this layout")
+
+    spec = importlib.util.spec_from_file_location("cmdm_update", source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 

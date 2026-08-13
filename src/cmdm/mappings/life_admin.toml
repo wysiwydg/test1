@@ -66,7 +66,21 @@ vocabulary = { "M" = "MONTHLY", "MONTHLY" = "MONTHLY", "Q" = "QUARTERLY", "QUART
 [[party]]
 role = "OWNER"
 key_field = "OwnerCustomerId"
-key_kind = "OWNER_CUSTOMER_ID"
+# One customer-number space, not two. OwnerCustomerId and InsuredCustomerId
+# are the columns the extract puts a customer number in for each role; they
+# are not separate namespaces. C-000400 is the same human whether it arrives
+# in the owner column or the insured column, and declaring two key kinds told
+# the crosswalk otherwise -- so that person became two golden records, and the
+# probabilistic matcher was left to rediscover an identity the source had
+# stated outright. Change this only if a source genuinely issues its owner and
+# insured numbers from different sequences; most do not.
+key_kind = "CUSTOMER_ID"
+# Insurable interest, as the source recorded it at application. Declared only on
+# the owner block: it is the owner whose right to insure someone else's life has
+# to be justified, so it is the owner's relation to the insured that the system
+# captures. Read by the householding pass in preference to inferring a family
+# from shared surnames and postcodes.
+relationship_field = "OwnerRelationshipToInsured"
 
 [party.fields]
 full_name = { source = "OwnerName", transform = "name" }
@@ -88,7 +102,7 @@ vocabulary = { "M" = "MALE", "MALE" = "MALE", "F" = "FEMALE", "FEMALE" = "FEMALE
 [[party]]
 role = "INSURED"
 key_field = "InsuredCustomerId"
-key_kind = "INSURED_CUSTOMER_ID"
+key_kind = "CUSTOMER_ID"  # same space as the owner column; see above
 
 [party.fields]
 full_name = { source = "InsuredName", transform = "name" }

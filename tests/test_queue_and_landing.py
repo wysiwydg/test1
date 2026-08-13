@@ -67,6 +67,7 @@ def raw(mapping) -> pl.DataFrame:
         "PolicyTerm": ["20"] * n, "PremiumTerm": ["20"] * n,
         "LastUpdatedTs": ["2024-01-01"] * n,
         "OwnerCustomerId": [f"C-{i}" for i in range(n)],
+        "OwnerRelationshipToInsured": ["SELF"] * n,
         "OwnerName": ["John Smith", "Jane Doe", "The Patel Trust", "Ann Lee"],
         "OwnerDOB": ["1980-05-01"] * n, "OwnerGender": ["M"] * n,
         "OwnerEmail": ["a@b.com"] * n, "OwnerPhone": ["020 7946 0958"] * n,

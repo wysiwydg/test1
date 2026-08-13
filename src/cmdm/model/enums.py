@@ -106,11 +106,25 @@ IDENTIFIED_ROLES: frozenset[PartyRole] = frozenset(
 
 
 class AssociationType(_StrEnum):
-    """Person-to-person edges derived from shared policies.
+    """Party-to-party edges derived from shared policies.
 
-    These are inferred, never sourced. Each carries the policies that evidence
-    it so that any derived edge can be traced back to the facts that produced
-    it and recomputed from scratch.
+    These are derived, never stored as delivered. Each carries the policies that
+    evidence it so that any derived edge can be traced back to the facts that
+    produced it and recomputed from scratch.
+
+    Three groups, and the difference between them decides what a household is.
+
+    *   **Structural** -- CO_INSURED through AGENT_SERVICES. Two parties appear
+        on one policy. True by construction and says nothing about how they are
+        related: an agent shares a policy with everyone they write for.
+    *   **Familial** -- SPOUSE_OF through PARENT_OF. A specific family relation
+        the source stated, because insurable interest is a condition of issue
+        and every life administration system records it. These are what a
+        household is built from.
+    *   **Affiliation** -- EMPLOYEE_OF through ESTATE_SUBJECT_OF. A party's link
+        to a legal entity. Emphatically *not* a household: the directors a
+        company insures do not live together, and treating an employer like a
+        family is how a householding pass produces a "household" of forty.
     """
 
     CO_INSURED = "CO_INSURED"
@@ -119,8 +133,28 @@ class AssociationType(_StrEnum):
     INSURED_OF_OWNER = "INSURED_OF_OWNER"
     SERVICED_BY_AGENT = "SERVICED_BY_AGENT"
     AGENT_SERVICES = "AGENT_SERVICES"
+
+    SPOUSE_OF = "SPOUSE_OF"
+    CHILD_OF = "CHILD_OF"
+    PARENT_OF = "PARENT_OF"
     HOUSEHOLD_MEMBER = "HOUSEHOLD_MEMBER"
+
+    EMPLOYEE_OF = "EMPLOYEE_OF"
+    TRUST_MEMBER_OF = "TRUST_MEMBER_OF"
+    ESTATE_SUBJECT_OF = "ESTATE_SUBJECT_OF"
+
     SUSPECTED_DUPLICATE = "SUSPECTED_DUPLICATE"
+
+    @classmethod
+    def familial(cls) -> frozenset[AssociationType]:
+        """The associations a household may be built from."""
+        return frozenset({cls.SPOUSE_OF, cls.CHILD_OF, cls.PARENT_OF})
+
+    @classmethod
+    def affiliation(cls) -> frozenset[AssociationType]:
+        """A party's link to a legal entity, which is never a household."""
+        return frozenset({cls.EMPLOYEE_OF, cls.TRUST_MEMBER_OF,
+                          cls.ESTATE_SUBJECT_OF})
 
 
 class EdgeKind(_StrEnum):

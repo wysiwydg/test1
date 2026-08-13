@@ -134,6 +134,20 @@ def transaction(dsn: str | None = None) -> Iterator[psycopg.Connection]:
         yield conn
 
 
+#: Marker the DDL renderer writes into the baseline it generates.
+GENERATED_MARKER = "GENERATED FILE. Do not edit by hand."
+
+
+def _is_generated(sql: str) -> bool:
+    """Whether this file is rendered from the registry rather than hand-written.
+
+    Read from the file's own header rather than from a filename allow-list, so
+    the rule follows the property that justifies it: a file nobody edits by hand
+    cannot be edited by hand in a way worth stopping for.
+    """
+    return GENERATED_MARKER in sql[:1000]
+
+
 def apply_migrations(
     conn: psycopg.Connection, *, directory: pathlib.Path | None = None
 ) -> list[str]:
@@ -172,11 +186,29 @@ def apply_migrations(
             # An edited migration is a bug worth stopping for: the database
             # already ran the old text, so the file no longer describes the
             # schema that exists.
-            if applied[path.name] != checksum:
+            #
+            # The generated baseline is the one exception, and it is not a
+            # loophole. 001 is not a migration in the same sense as the others:
+            # it is the schema's *definition*, rendered from the field registry
+            # and replayed only into an empty database. A registry change
+            # necessarily rewrites it, and a store that already applied it moves
+            # forward through the numbered hand-written files instead -- so
+            # refusing to start because the definition has moved on would fail
+            # every existing installation on every release, to protect against a
+            # file that is never re-run. What must not drift is the *schema*,
+            # and that is what the hand-written migrations carry.
+            if applied[path.name] != checksum and not _is_generated(sql):
                 raise RuntimeError(
                     f"{path.name} has changed since it was applied. Migrations are "
                     "immutable once run; add a new file instead."
                 )
+            if applied[path.name] != checksum:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE public.schema_migration SET checksum = %s "
+                        "WHERE filename = %s",
+                        (checksum, path.name),
+                    )
             continue
 
         with conn.cursor() as cur:

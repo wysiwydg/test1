@@ -31,6 +31,7 @@ from typing import Any
 import polars as pl
 import psycopg
 
+from cmdm.household import HouseholdReport, derive_households
 from cmdm.ingest.mapping import SourceMapping
 from cmdm.ingest.normalize import normalize_policy_number
 from cmdm.ingest.shred import shred
@@ -68,6 +69,7 @@ class PipelineResult:
     standardization: StandardizationReport | None = None
     resolution: ResolutionReport | None = None
     survivorship: SurvivorshipReport | None = None
+    households: HouseholdReport | None = None
     writes: dict[str, dict[str, Any]] = field(default_factory=dict)
     xref_rows: int = 0
     policy_xref_rows: int = 0
@@ -82,6 +84,7 @@ class PipelineResult:
             "standardization": self.standardization.as_dict() if self.standardization else None,
             "resolution": self.resolution.as_dict() if self.resolution else None,
             "survivorship": self.survivorship.as_dict() if self.survivorship else None,
+            "households": self.households.as_dict() if self.households else None,
             "writes": self.writes,
             "xref_rows": self.xref_rows,
             "policy_xref_rows": self.policy_xref_rows,
@@ -528,6 +531,12 @@ def run_pipeline(
         )
         if relationship_write:
             result.writes["relationship"] = relationship_write
+
+        # Households, over the whole book rather than this batch. A household is
+        # a property of the population: a batch that adds one member changes the
+        # household its existing members are in, and recomputing only the batch
+        # would leave the rest of the family pointing at a stale group.
+        result.households = derive_households(conn)
 
     links = contributors.select(
         "person_id", "source_system", "source_key_kind", "source_party_key"

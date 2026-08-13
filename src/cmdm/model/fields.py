@@ -1001,6 +1001,44 @@ PERSON = EntitySpec(
             derived=True,
         ),
         FieldSpec(
+            "household_id",
+            LT.UUID,
+            "The household this party belongs to: the group of parties the "
+            "sources say live together as a family. Null for a party with no "
+            "evidence of one, which is the honest answer for most single "
+            "policyholders and for every legal entity. Denormalised onto Person "
+            "rather than only expressed as edges because 'everyone in this "
+            "customer's household' is asked on every servicing screen, and "
+            "walking a graph to answer it there would make the common case the "
+            "expensive one.",
+            nullable=True,
+            survivorship=SS.DERIVED,
+            derived=True,
+            indexed=True,
+        ),
+        FieldSpec(
+            "household_size",
+            LT.INT32,
+            "How many parties are in this party's household, including this "
+            "one. One means a household of a single person; zero means none "
+            "was established. Carried so that a list of customers can show "
+            "which are part of a family without a join per row.",
+            nullable=False,
+            survivorship=SS.DERIVED,
+            derived=True,
+        ),
+        FieldSpec(
+            "affiliation_count",
+            LT.INT32,
+            "Number of legal entities -- companies, trusts, estates -- this "
+            "party is linked to. Kept apart from household_size because an "
+            "employer is not a family: a company insuring forty staff would "
+            "otherwise read as a household of forty-one.",
+            nullable=False,
+            survivorship=SS.DERIVED,
+            derived=True,
+        ),
+        FieldSpec(
             "data_quality_score",
             LT.RATIO,
             "Share of matchable attributes populated. Low-scoring records are "
@@ -1182,6 +1220,22 @@ RELATIONSHIP = EntitySpec(
             nullable=False,
             survivorship=SS.DERIVED,
             derived=True,
+        ),
+        FieldSpec(
+            "stated_relationship",
+            LT.STRING,
+            "How the source described this party's relation to the life "
+            "insured -- SPOUSE, CHILD, EMPLOYER and so on -- exactly as "
+            "delivered. Held on the sourced edge because it is an assertion the "
+            "source made, not something derived: insurable interest is a "
+            "condition of issue, so every life administration system captures "
+            "it at application. The householding pass reads this rather than "
+            "guessing from surnames and addresses, which is the difference "
+            "between knowing two parties are married and noticing they share a "
+            "postcode.",
+            nullable=True,
+            survivorship=SS.MOST_TRUSTED_SOURCE,
+            indexed=True,
         ),
         FieldSpec(
             "derivation_method",

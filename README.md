@@ -67,6 +67,13 @@ Three entities:
   Owner / Insured / Agent, plus Person↔Person edges derived from them for
   householding and agent-book views.
 
+**Households** are derived on top of those edges, from the relationship the
+source stated at application — insurable interest is a condition of issue, so a
+life admin system records that the owner is the insured's spouse, parent or
+child. Deliberately *not* from shared addresses: two people at one postcode are
+two people. A party's links to companies, trusts and estates are counted
+separately, because an employer is not a family.
+
 Plus the control tables that make the above defensible: an immutable landing
 zone, the identity crosswalk, per-attribute survivorship provenance, and an
 append-only match audit.
@@ -127,6 +134,7 @@ src/cmdm/api/
 src/cmdm/ui/
     console.py      Ingestion, steward and business consoles, server-rendered
 src/cmdm/export.py      Entity dashboard, and the delivered extract with MDM ids
+src/cmdm/household.py   Households and affiliations, from stated relationships
 src/cmdm/observe/
     metrics.py      Operational, match-quality and data-quality metrics
 src/cmdm/pipeline.py    End-to-end orchestration

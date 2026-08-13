@@ -40,6 +40,7 @@ from psycopg.rows import dict_row
 
 from cmdm.deps import SESSION_COOKIE, ConnectionDep, PrincipalDep, require
 from cmdm.governance.rbac import (
+    MASK,
     Action,
     Principal,
     log_access,
@@ -423,6 +424,8 @@ def person_detail(
             )
     body.append("</tbody></table>")
 
+    body.append(_household_panel(conn, resolved, revealed))
+
     body.append("<h2>Contributing sources</h2><table><thead><tr><th>System</th>"
                 "<th>Key kind</th><th>Key</th><th>Active</th><th>How</th>"
                 "</tr></thead><tbody>")
@@ -515,6 +518,21 @@ def entities(
     body.append(_metric(totals.get("revised_persons"), "Revised since first write"))
     body.append(_metric(totals.get("person_keys"), "Source keys crosswalked"))
 
+    body.append("<h2>Household</h2>")
+    body.append('<p class="note">Built from the relationship each source stated '
+                "at application — spouse, child, parent — not from shared "
+                "addresses. Two people at one postcode are two people.</p>")
+    body.append(_metric(totals.get("households"), "Households"))
+    body.append(_metric(totals.get("persons_in_a_household"), "Parties in one"))
+    body.append(_metric(totals.get("largest_household"), "Largest"))
+    body.append(_metric(totals.get("affiliated_persons"),
+                        "Linked to a company, trust or estate"))
+    body.append(_metric(totals.get("derived_edges"), "Derived party edges"))
+    body.append(_breakdown("Household size", totals.get("by_household_size", []),
+                           "household_size"))
+    body.append(_breakdown("Association", totals.get("by_association", []),
+                           "association_type"))
+
     body.append("<h2>Policy and Relationship</h2>")
     body.append(_metric(totals.get("policy_sources"), "Source systems"))
     body.append(_metric(totals.get("policy_keys"), "Policy keys crosswalked"))
@@ -573,6 +591,100 @@ def entities(
                 body.append(f'<p>{" &nbsp; ".join(links)}</p>')
 
     return _page("Entities", principal, "".join(body), active="entities")
+
+
+#: How an association reads in a sentence, from this party's side. The stored
+#: edge has a direction, so the same row means different things depending on
+#: which end you are standing at, and rendering "CHILD_OF" for both is how a
+#: servicing screen tells somebody their father is their son.
+_RELATION_LABEL = {
+    ("SPOUSE_OF", True): "spouse", ("SPOUSE_OF", False): "spouse",
+    ("CHILD_OF", True): "parent of", ("CHILD_OF", False): "child of",
+    ("PARENT_OF", True): "child of", ("PARENT_OF", False): "parent of",
+    ("EMPLOYEE_OF", True): "employer of", ("EMPLOYEE_OF", False): "works for",
+    ("TRUST_MEMBER_OF", True): "holds policies for",
+    ("TRUST_MEMBER_OF", False): "beneficiary of",
+    ("ESTATE_SUBJECT_OF", True): "estate of",
+    ("ESTATE_SUBJECT_OF", False): "estate is",
+}
+
+
+def _relation_label(association: str, outgoing: bool) -> str:
+    return _RELATION_LABEL.get((association, outgoing), association.replace("_", " ").lower())
+
+
+def _household_panel(conn: Any, person_id: Any, revealed: bool) -> str:
+    """Who this party lives with, and which legal entities they belong to.
+
+    Two sections and not one. A household is a family; an affiliation is a
+    company, a trust or an estate. Showing them together would invite the read
+    that a person's employer is part of their household, which is both wrong
+    and the failure this feature most easily produces.
+    """
+    from cmdm.household import household_of
+
+    found = household_of(conn, person_id)
+    members = [m for m in found["members"] if str(m["person_id"]) != str(person_id)]
+    relations = found["relations"]
+    affiliations = found["affiliations"]
+
+    out = ["<h2>Household and connections</h2>"]
+
+    if not found["household_id"] and not affiliations:
+        out.append('<p class="note">No household or affiliation on record. '
+                   "Nothing the sources delivered links this party to another "
+                   "as family, and none links them to a company, trust or "
+                   "estate.</p>")
+        return "".join(out)
+
+    if found["household_id"]:
+        # How each member relates to *this* party, where an edge says so. A
+        # household is transitive, so a member two steps away is in it without
+        # any edge naming the relation directly; that member is listed with no
+        # relation rather than with a guessed one.
+        named = {r["person_id"]: r for r in relations}
+        out.append(
+            f'<p class="note">Household <code>{_esc(found["household_id"])}</code>'
+            f" — {found['household_size']} parties. Built from the relationships "
+            "the sources stated at application, not from shared addresses.</p>"
+        )
+        out.append("<table><thead><tr><th>Member</th><th>Relationship</th>"
+                   "<th>Evidence</th><th>Date of birth</th></tr></thead><tbody>")
+        for member in members:
+            relation = named.get(member["person_id"])
+            label = (_relation_label(relation["association_type"], relation["outgoing"])
+                     if relation else "same household")
+            evidence = (f"{relation['evidence_count']} polic"
+                        f"{'y' if relation['evidence_count'] == 1 else 'ies'}"
+                        if relation else "—")
+            name = member["full_name"] if revealed else MASK
+            out.append(
+                f'<tr><td><a href="/console/person/{_esc(member["person_id"])}">'
+                f"{_esc(name)}</a></td>"
+                f'<td><span class="chip">{_esc(label)}</span></td>'
+                f"<td>{_esc(evidence)}</td>"
+                f"<td>{_esc(member['date_of_birth'] if revealed else MASK)}</td></tr>"
+            )
+        out.append("</tbody></table>")
+
+    if affiliations:
+        out.append("<h2>Belongs to</h2>")
+        out.append('<p class="note">Companies, trusts and estates this party is '
+                   "linked to. Deliberately not part of the household: an "
+                   "employer is not family.</p>")
+        out.append("<table><thead><tr><th>Entity</th><th>Kind</th>"
+                   "<th>Link</th><th>Evidence</th></tr></thead><tbody>")
+        for entry in affiliations:
+            out.append(
+                f'<tr><td><a href="/console/person/{_esc(entry["person_id"])}">'
+                f"{_esc(entry['full_name'])}</a></td>"
+                f'<td><span class="chip">{_esc(entry["party_type"])}</span></td>'
+                f"<td>{_esc(_relation_label(entry['association_type'], entry['outgoing']))}</td>"
+                f"<td>{_esc(entry['evidence_count'])}</td></tr>"
+            )
+        out.append("</tbody></table>")
+
+    return "".join(out)
 
 
 def _browse_cell(column: str, value: Any) -> str:

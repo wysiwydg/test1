@@ -397,6 +397,8 @@ def test_pipeline_runs_every_stage(conn) -> None:
         "LastUpdatedTs": ["2024-01-01"] * n,
         # Two source ids for the same human, which is what resolution must find.
         "OwnerCustomerId": ["C-1", "C-1", "C-2", "C-2", "C-3", "C-3"],
+        "OwnerRelationshipToInsured": ["SELF", "SELF", "SPOUSE", "SPOUSE",
+                                      "SELF", "SELF"],
         "OwnerName": ["John Smith", "SMITH, JOHN", "Jane Doe", "Jane Doe",
                       "Priya Patel", "Priya Patel"],
         "OwnerDOB": ["1980-05-01"] * 2 + ["1975-01-01"] * 2 + ["1990-09-09"] * 2,
@@ -428,9 +430,14 @@ def test_pipeline_runs_every_stage(conn) -> None:
     assert result.policies == 6
     assert result.source_identities > 0
     assert result.golden_persons > 0
-    # Resolution must collapse something: the same party appears under two
-    # namespaces and across several policies.
-    assert result.golden_persons < result.source_identities
+    # Deterministic collapse happens before matching runs: 18 party occurrences
+    # across 6 policies are 4 source identities, because the same customer
+    # number in the owner column and the insured column is the same customer.
+    # This used to be left to the probabilistic matcher, which had to
+    # rediscover an identity the source had stated outright.
+    assert result.party_occurrences == 18
+    assert result.source_identities == 4
+    assert result.golden_persons <= result.source_identities
     assert result.writes["person"]["inserted"] == result.golden_persons
     assert result.xref_rows > 0
 

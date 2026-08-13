@@ -122,6 +122,13 @@ class PartyMapping:
     fields: Sequence[FieldMapping] = ()
     #: Ordinal for a repeated role, distinguishing first insured from second.
     role_sequence: int = 1
+    #: Inbound column stating how this party relates to the life insured --
+    #: SPOUSE, CHILD, EMPLOYER. Optional, and normally declared only on the
+    #: owner block, since that is the party whose insurable interest has to be
+    #: justified. Read by the householding pass, which is why a source that
+    #: carries it produces families the system knows about rather than families
+    #: it guessed at from surnames and postcodes.
+    relationship_field: str | None = None
 
     def __post_init__(self) -> None:
         if not any(f.canonical == "full_name" for f in self.fields):
@@ -181,6 +188,8 @@ class SourceMapping:
                 cols.append(f.source)
         for party in self.parties:
             cols.append(party.key_field)
+            if party.relationship_field:
+                cols.append(party.relationship_field)
             for f in party.fields:
                 if f.source:
                     cols.append(f.source)
@@ -290,6 +299,7 @@ def parse_mapping(document: Mapping[str, Any]) -> SourceMapping:
                 key_kind=block["key_kind"],
                 fields=fields,
                 role_sequence=block.get("role_sequence", 1),
+                relationship_field=block.get("relationship_field"),
             )
         )
 

@@ -53,7 +53,13 @@ CREATE TYPE mdm.association_type AS ENUM (
     'INSURED_OF_OWNER',
     'SERVICED_BY_AGENT',
     'AGENT_SERVICES',
+    'SPOUSE_OF',
+    'CHILD_OF',
+    'PARENT_OF',
     'HOUSEHOLD_MEMBER',
+    'EMPLOYEE_OF',
+    'TRUST_MEMBER_OF',
+    'ESTATE_SUBJECT_OF',
     'SUSPECTED_DUPLICATE'
 );
 
@@ -417,6 +423,9 @@ CREATE TABLE mdm.person (
     is_sanctioned          boolean NOT NULL,
     policy_count           integer NOT NULL,
     role_bitmap            integer NOT NULL,
+    household_id           uuid,
+    household_size         integer NOT NULL,
+    affiliation_count      integer NOT NULL,
     data_quality_score     double precision NOT NULL,
     version                integer NOT NULL,
     valid_from             timestamptz NOT NULL,
@@ -476,6 +485,9 @@ COMMENT ON COLUMN mdm.person.do_not_contact IS 'Marketing suppression. ANY_TRUE 
 COMMENT ON COLUMN mdm.person.is_sanctioned IS 'Screening hit against a sanctions or PEP list. ANY_TRUE.';
 COMMENT ON COLUMN mdm.person.policy_count IS 'Number of current policies this party is attached to in any role.';
 COMMENT ON COLUMN mdm.person.role_bitmap IS 'Bitmask of the roles this party has ever held. Answers ''is this person also an agent?'' without touching the relationship table, which matters because that question drives conflict-of-interest checks over the whole population at once.';
+COMMENT ON COLUMN mdm.person.household_id IS 'The household this party belongs to: the group of parties the sources say live together as a family. Null for a party with no evidence of one, which is the honest answer for most single policyholders and for every legal entity. Denormalised onto Person rather than only expressed as edges because ''everyone in this customer''s household'' is asked on every servicing screen, and walking a graph to answer it there would make the common case the expensive one.';
+COMMENT ON COLUMN mdm.person.household_size IS 'How many parties are in this party''s household, including this one. One means a household of a single person; zero means none was established. Carried so that a list of customers can show which are part of a family without a join per row.';
+COMMENT ON COLUMN mdm.person.affiliation_count IS 'Number of legal entities -- companies, trusts, estates -- this party is linked to. Kept apart from household_size because an employer is not a family: a company insuring forty staff would otherwise read as a household of forty-one.';
 COMMENT ON COLUMN mdm.person.data_quality_score IS 'Share of matchable attributes populated. Low-scoring records are held out of automatic merging, because a record with only a common name and nothing else will match too many things.';
 COMMENT ON COLUMN mdm.person.version IS 'Monotonic version of this person. Starts at 1 for the first golden write and increments on every materially changed re-write.';
 COMMENT ON COLUMN mdm.person.valid_from IS 'Instant this version became the current one.';
@@ -521,6 +533,9 @@ CREATE INDEX ix_person_phone_e164
 CREATE INDEX ix_person_address_key
     ON mdm.person (address_key)
     WHERE is_current;
+CREATE INDEX ix_person_household_id
+    ON mdm.person (household_id)
+    WHERE is_current;
 CREATE INDEX ix_person_valid_from
     ON mdm.person (valid_from)
     WHERE is_current;
@@ -565,6 +580,7 @@ CREATE TABLE mdm.relationship (
     effective_to         date,
     evidence_policy_ids  uuid[],
     evidence_count       integer NOT NULL,
+    stated_relationship  text,
     derivation_method    derivation_method NOT NULL,
     version              integer NOT NULL,
     valid_from           timestamptz NOT NULL,
@@ -610,6 +626,7 @@ COMMENT ON COLUMN mdm.relationship.effective_from IS 'Real-world date the party 
 COMMENT ON COLUMN mdm.relationship.effective_to IS 'Real-world date the party ceased this role. Null while current.';
 COMMENT ON COLUMN mdm.relationship.evidence_policy_ids IS 'Policies that evidence a derived PARTY_PARTY edge. Empty for sourced edges. Makes every inference traceable to the facts behind it.';
 COMMENT ON COLUMN mdm.relationship.evidence_count IS 'Number of distinct policies supporting a derived edge. Two people sharing five policies is a much stronger signal than sharing one.';
+COMMENT ON COLUMN mdm.relationship.stated_relationship IS 'How the source described this party''s relation to the life insured -- SPOUSE, CHILD, EMPLOYER and so on -- exactly as delivered. Held on the sourced edge because it is an assertion the source made, not something derived: insurable interest is a condition of issue, so every life administration system captures it at application. The householding pass reads this rather than guessing from surnames and addresses, which is the difference between knowing two parties are married and noticing they share a postcode.';
 COMMENT ON COLUMN mdm.relationship.derivation_method IS 'How the edge was established, from an exact key match through to the local-model fallback. The audit trail for anything AI touched.';
 COMMENT ON COLUMN mdm.relationship.version IS 'Monotonic version of this relationship. Starts at 1 for the first golden write and increments on every materially changed re-write.';
 COMMENT ON COLUMN mdm.relationship.valid_from IS 'Instant this version became the current one.';
@@ -654,6 +671,9 @@ CREATE INDEX ix_relationship_source_party_key
     WHERE is_current;
 CREATE INDEX ix_relationship_source_system
     ON mdm.relationship (source_system)
+    WHERE is_current;
+CREATE INDEX ix_relationship_stated_relationship
+    ON mdm.relationship (stated_relationship)
     WHERE is_current;
 CREATE INDEX ix_relationship_derivation_method
     ON mdm.relationship (derivation_method)

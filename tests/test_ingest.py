@@ -433,6 +433,7 @@ def raw_batch() -> pl.DataFrame:
         "PremiumTerm": ["20", "25", "20"],
         "LastUpdatedTs": ["2024-01-01"] * 3,
         "OwnerCustomerId": ["C-1", "C-2", "C-1"],
+        "OwnerRelationshipToInsured": ["SELF", "TRUSTEE", "self"],
         "OwnerName": ["Mr John Smith", "The Patel Family Trust", "SMITH, JOHN"],
         "OwnerDOB": ["1980-05-01", "", "1980-05-01"],
         "OwnerGender": ["M", "", "M"],
@@ -529,24 +530,41 @@ def test_collapse_prefers_the_more_complete_occurrence(
     """C-1 appears twice as owner; the occurrence with contact details wins."""
     owner = shredded["person"].filter(
         (pl.col("source_party_key") == "C-1")
-        & (pl.col("source_key_kind") == "OWNER_CUSTOMER_ID")
+        & (pl.col("source_key_kind") == "CUSTOMER_ID")
     )
     assert owner.height == 1
     assert owner["email_normalized"][0] == "john.smith@example.com"
     assert owner["date_of_birth"][0] is not None
 
 
-def test_owner_and_insured_namespaces_stay_separate(
+def test_one_customer_number_space_collapses_across_roles(
     shredded: dict[str, pl.DataFrame],
 ) -> None:
-    """The same literal key in two namespaces is two crosswalk entries.
+    """C-1 as owner and C-1 as insured are one party, because the mapping says
+    the two columns draw on one customer-number space.
 
-    Collapsing them here would be probabilistic matching done in the wrong
-    place. C-1 is both an OwnerCustomerId and an InsuredCustomerId; merging the
-    two is the matching stage's job, with an audit trail.
+    They were declared as two namespaces, which told the crosswalk that the
+    same customer number in the owner column and the insured column named two
+    different people. It split 345 customers in the 5,000-policy sample into
+    two golden records each and left the probabilistic matcher to rediscover an
+    identity the source had stated outright -- which it did for most of them,
+    and not for all.
+
+    The namespace mechanism is right and stays: an AgentCode of "C-1" would
+    still be a different party. What was wrong was the claim that owner numbers
+    and insured numbers are different sequences.
     """
     c1 = shredded["person"].filter(pl.col("source_party_key") == "C-1")
-    assert set(c1["source_key_kind"]) == {"OWNER_CUSTOMER_ID", "INSURED_CUSTOMER_ID"}
+    assert set(c1["source_key_kind"]) == {"CUSTOMER_ID"}
+    assert c1.height == 1, "one source identity, not one per role"
+
+
+def test_a_different_namespace_is_still_a_different_party(
+    shredded: dict[str, pl.DataFrame],
+) -> None:
+    """The agent block draws on its own sequence, and must stay separate."""
+    kinds = set(shredded["person"]["source_key_kind"])
+    assert "AGENT_CODE" in kinds and "CUSTOMER_ID" in kinds
 
 
 def test_shred_derives_the_columns_sources_cannot_supply(

@@ -166,15 +166,21 @@ def check_pipeline() -> str:
 
         pairs = conn.execute("SELECT count(*) FROM mdm.match_pair").fetchone()[0]
         edges = conn.execute(
-            "SELECT count(*) FROM mdm.relationship WHERE is_current"
+            "SELECT count(*) FROM mdm.relationship "
+            "WHERE is_current AND edge_kind = 'PARTY_POLICY'"
         ).fetchone()[0]
 
     assert result.policies == 5000, f"expected 5,000 policies, got {result.policies}"
     assert result.golden_persons > 2000, f"only {result.golden_persons} golden persons"
     assert pairs > 0, "no match decisions were recorded"
     assert edges == 15000, f"expected 15,000 role edges, got {edges}"
+
+    households = result.households
+    assert households and households.households > 300, \
+        f"only {households.households if households else 0} households derived"
+    assert households.affiliations > 0, "no company, trust or estate links derived"
     return (f"{result.policies:,} policies -> {result.golden_persons:,} golden "
-            f"persons, {edges:,} role edges")
+            f"persons, {edges:,} role edges, {households.households:,} households")
 
 
 @step("re-processing the same batch changes nothing")
