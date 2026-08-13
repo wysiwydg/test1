@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import pathlib
 import platform
+import re
 import secrets
 import subprocess
 import sys
@@ -55,6 +56,39 @@ def run(argv: list[str], what: str) -> None:
         raise SystemExit(fail(f"{what} failed (exit {result.returncode})"))
 
 
+#: pip's message for a package that is simply not in the wheelhouse.
+MISSING_PATTERN = re.compile(
+    r"No matching distribution found for ([A-Za-z0-9._-]+)", re.MULTILINE
+)
+
+
+def _explain_install_failure(stderr: str) -> int:
+    """Turn pip's failure into something the person in front of it can act on.
+
+    The failure that matters here has one cause and one fix, and pip's wording
+    points at neither. A wheelhouse built on Linux for Windows silently omits
+    anything guarded by a marker like ``sys_platform == "win32"``, because pip
+    resolves markers against the machine doing the downloading, not the target.
+    The result is a bundle that looks complete and fails on arrival -- with no
+    network to fetch the missing piece from.
+    """
+    missing = sorted(set(MISSING_PATTERN.findall(stderr)))
+    print()
+    if missing:
+        print(f"STOPPED: this bundle is missing {len(missing)} package(s): "
+              f"{', '.join(missing)}", file=sys.stderr)
+        print(
+            "\nThat is a fault in the bundle, not in this machine, and it "
+            "cannot be fixed here\nwithout a network. Ask for a rebuild that "
+            "includes them.\n",
+            file=sys.stderr,
+        )
+    else:
+        print("STOPPED: the offline install failed; pip's output is above.",
+              file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     print("\nCustomer MDM — offline install\n")
 
@@ -89,7 +123,7 @@ def main() -> int:
         say(f"reusing existing virtual environment in {VENV.name}")
 
     say("installing (offline — pip is forbidden from reaching the network)")
-    run(
+    result = subprocess.run(
         [
             str(venv_python()), "-m", "pip", "install",
             "--no-index",                       # never consult PyPI
@@ -98,8 +132,12 @@ def main() -> int:
             "--no-warn-script-location",
             *TOP_LEVEL,
         ],
-        "installing the wheels",
+        cwd=HERE, capture_output=True, text=True,
     )
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        print(result.stderr, end="", file=sys.stderr)
+        return _explain_install_failure(result.stderr)
 
     config = HERE / "config.cmd"
     if not config.exists():

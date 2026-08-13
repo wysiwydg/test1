@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,7 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
         *(dep for spec in TOP_LEVEL for dep in _requirements(spec)),
     ])
 
+    _complete_closure(wheels, platform, python)
     _postgres_binaries(staging, platform, python)
 
     print("building the cmdm wheel")
@@ -92,6 +94,101 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
 
     _checksums(staging)
     return _zip(staging, out_dir)
+
+
+def _marker_environment(platform: str, python: str) -> dict[str, str]:
+    """The PEP 508 environment of the *target*, not of this machine."""
+    if platform.startswith("win"):
+        system, sys_platform, os_name = "Windows", "win32", "nt"
+        machine = "AMD64"
+    elif platform.startswith("macosx"):
+        system, sys_platform, os_name = "Darwin", "darwin", "posix"
+        machine = "arm64" if "arm64" in platform else "x86_64"
+    else:
+        system, sys_platform, os_name = "Linux", "linux", "posix"
+        machine = "aarch64" if "aarch64" in platform else "x86_64"
+
+    return {
+        "sys_platform": sys_platform,
+        "platform_system": system,
+        "os_name": os_name,
+        "platform_machine": machine,
+        "python_version": python,
+        "python_full_version": f"{python}.0",
+        "implementation_name": "cpython",
+        "platform_python_implementation": "CPython",
+        "extra": "",
+    }
+
+
+def _declared_requirements(wheel: pathlib.Path) -> list[str]:
+    import email
+
+    with zipfile.ZipFile(wheel) as z:
+        name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+        message = email.message_from_bytes(z.read(name))
+    return message.get_all("Requires-Dist") or []
+
+
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _present(wheels: pathlib.Path) -> set[str]:
+    return {_canonical(w.name.split("-")[0]) for w in wheels.glob("*.whl")}
+
+
+def _missing_for_target(wheels: pathlib.Path, environment: dict[str, str]) -> set[str]:
+    """Requirements the target needs that this wheelhouse does not contain.
+
+    ``pip download --platform`` chooses wheel *tags* for the target but still
+    evaluates environment *markers* against the machine doing the downloading.
+    So a dependency guarded by ``sys_platform == "win32"`` is silently skipped
+    when building on Linux, and the omission only surfaces on the target --
+    where there is no network to fix it with. On this project that was colorama
+    (click, pytest) and tzdata, which psycopg needs on Windows to resolve the
+    timezones every timestamptz column depends on.
+    """
+    from packaging.requirements import Requirement
+
+    have = _present(wheels)
+    missing: set[str] = set()
+    for wheel in wheels.glob("*.whl"):
+        for raw in _declared_requirements(wheel):
+            requirement = Requirement(raw)
+            if requirement.marker and not requirement.marker.evaluate(environment):
+                continue
+            if _canonical(requirement.name) not in have:
+                missing.add(str(requirement).split(";")[0].strip())
+    return missing
+
+
+def _complete_closure(wheels: pathlib.Path, platform: str, python: str) -> None:
+    """Fetch what the target needs and this machine's markers hid.
+
+    Iterated to a fixpoint because a package pulled in this way brings its own
+    requirements, which may themselves be platform-gated.
+    """
+    environment = _marker_environment(platform, python)
+    abi = f"cp{python.replace('.', '')}"
+
+    for _ in range(5):
+        missing = _missing_for_target(wheels, environment)
+        if not missing:
+            return
+        print(f"target needs {len(missing)} package(s) this platform's markers hid: "
+              f"{', '.join(sorted(missing))}")
+        run([
+            sys.executable, "-m", "pip", "download", "--dest", str(wheels),
+            "--no-deps", "--only-binary=:all:", "--platform", platform,
+            "--python-version", python, "--implementation", "cp", "--abi", abi,
+            *sorted(missing),
+        ])
+
+    raise SystemExit(
+        f"dependency closure did not settle: still missing "
+        f"{sorted(_missing_for_target(wheels, environment))}"
+    )
 
 
 def _postgres_binaries(staging: pathlib.Path, platform: str, python: str) -> None:
