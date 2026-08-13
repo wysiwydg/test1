@@ -419,6 +419,104 @@ def _landed_frame(
 # ---------------------------------------------------------------------------
 
 
+def stale_key_kinds(conn: psycopg.Connection, mappings: list[SourceMapping]) -> dict[str, int]:
+    """Key kinds in the crosswalk that no installed mapping declares any more.
+
+    A key kind is part of a party's identity, so changing one in a mapping
+    re-keys the crosswalk. Re-processing after such a change does not correct
+    the old rows: it mints a *second* golden person under the new key and
+    leaves the first behind, which doubles the affected customers rather than
+    fixing them. The store has no way to notice on its own — nothing is
+    violated, the identities are simply no longer the ones being written.
+
+    So it is detected by comparing what is in the crosswalk against what the
+    mappings now declare. Anything left over needs a rebuild, not a backfill.
+    """
+    declared = {p.key_kind for m in mappings for p in m.parties}
+    rows = conn.execute(
+        "SELECT source_key_kind, count(*) FROM mdm.person_xref "
+        "WHERE is_active GROUP BY source_key_kind"
+    ).fetchall()
+    return {kind: n for kind, n in rows if kind not in declared}
+
+
+def _rebuild(connect_pool, *, mappings: list[SourceMapping]) -> int:
+    """Discard the derived store and rebuild it from the landing zone.
+
+    The heavier of the two upgrade paths, and the one a re-keyed crosswalk
+    needs. Everything it deletes is derived: golden versions, the crosswalks,
+    provenance, the match ledger. The landing zone is untouched, and it holds
+    the delivered bytes of every batch ever accepted — which is the reason it
+    is immutable and never pruned. So this is a recomputation, not a data loss,
+    and the ids it produces are the ids the current code would have produced had
+    it been installed all along.
+
+    Two things do not survive and cannot: golden ids already published
+    downstream change, and steward decisions keyed on the old identities no
+    longer apply. That is why it is not the default and why the updater asks
+    before running it.
+    """
+    with connect_pool() as conn:
+        landed = conn.execute("SELECT count(*) FROM mdm.source_record").fetchone()[0]
+        if not landed:
+            log.info("nothing to rebuild: the landing zone is empty")
+            return 0
+
+        # Prove the pipeline can read this landing zone *before* deleting
+        # anything. A rebuild that truncates and then fails leaves an empty
+        # store, and although the delivered bytes are still there and re-running
+        # would fix it, "your golden store is now zero rows" is not a message to
+        # put in front of somebody at the point where they are least sure what
+        # they just did. The dry run does the whole thing except the write.
+        batch = conn.execute(
+            "SELECT b.batch_id FROM mdm.ingest_batch b "
+            "WHERE EXISTS (SELECT 1 FROM mdm.source_record s "
+            "              WHERE s.source_batch_id = b.batch_id::text) "
+            "ORDER BY b.submitted_at DESC LIMIT 1"
+        ).fetchone()
+        if batch:
+            try:
+                mapping = mapping_for_batch(conn, batch[0])
+                run_pipeline(
+                    conn, load_batch_frame(conn, batch[0], mapping), mapping,
+                    batch_id=batch[0], write=False,
+                )
+            except Exception as exc:
+                conn.rollback()
+                log.error(
+                    "refusing to rebuild: the current pipeline cannot process "
+                    "the most recent landed batch (%s: %s). Nothing was "
+                    "deleted.", type(exc).__name__, exc
+                )
+                return 1
+            conn.rollback()
+
+        log.warning(
+            "rebuilding the golden store from %s landed rows; published person "
+            "and policy ids will change", f"{landed:,}"
+        )
+        conn.execute(
+            "TRUNCATE mdm.relationship, mdm.person, mdm.policy, "
+            "mdm.person_master, mdm.policy_master, mdm.person_xref, "
+            "mdm.policy_xref, mdm.attribute_provenance, mdm.match_pair "
+            "CASCADE"
+        )
+        conn.commit()
+
+    code = _backfill(connect_pool)
+    if code:
+        return code
+
+    with connect_pool() as conn:
+        stale = stale_key_kinds(conn, mappings)
+    if stale:  # pragma: no cover - only if a mapping was removed, not changed
+        log.warning(
+            "key kinds still present with no mapping that declares them: %s. "
+            "A mapping file was removed rather than edited.", sorted(stale)
+        )
+    return 0
+
+
 def _backfill(connect_pool) -> int:
     """Re-run every landed batch through the current pipeline.
 
@@ -478,7 +576,40 @@ def _backfill(connect_pool) -> int:
         "backfill complete: %s new, %s revised, %s already correct",
         f"{added:,}", f"{versioned:,}", f"{untouched:,}",
     )
+    _report_absent_evidence(connect_pool)
     return 0
+
+
+def _report_absent_evidence(connect_pool) -> None:
+    """Say why a feature produced nothing, when the reason is the data.
+
+    A backfill can only derive what the delivered bytes support. Households are
+    built from the relationship a source states at application, and batches
+    landed before that column existed do not carry it -- so a store rebuilt
+    entirely from old extracts comes back with zero households and no error
+    anywhere, which reads as a broken feature rather than as an absent input.
+
+    Worth a line precisely because everything here succeeded.
+    """
+    with connect_pool() as conn:
+        stated, edges, households = conn.execute(
+            "SELECT (SELECT count(*) FROM mdm.relationship "
+            "         WHERE is_current AND stated_relationship IS NOT NULL),"
+            "       (SELECT count(*) FROM mdm.relationship "
+            "         WHERE is_current AND edge_kind = 'PARTY_POLICY'),"
+            "       (SELECT count(DISTINCT household_id) FROM mdm.person "
+            "         WHERE is_current AND household_id IS NOT NULL)"
+        ).fetchone()
+
+    if households:
+        log.info("%s households derived", f"{households:,}")
+    elif edges and not stated:
+        log.warning(
+            "no households derived: none of the %s landed party rows states how "
+            "the parties are related. The extracts in the landing zone predate "
+            "that column; households will appear when a file carrying it is "
+            "submitted.", f"{edges:,}"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -488,7 +619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Drain the ingest queue, or mine standardization rules.",
     )
     parser.add_argument(
-        "command", choices=("serve", "once", "mine", "backfill"),
+        "command", choices=("serve", "once", "mine", "backfill", "rebuild", "check"),
         nargs="?", default="serve",
     )
     parser.add_argument("--queue", default=QUEUE_STANDARDIZE)
@@ -533,7 +664,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("handled %d job(s)", len(outcomes))
         return 0 if all(o["ok"] for o in outcomes) else 1
 
-    if args.command == "backfill":
+    if args.command in ("backfill", "rebuild", "check"):
+        installed = [load_mapping(p) for p in sorted(MAPPINGS_DIR.glob("*.toml"))]
+
+        if args.command == "check":
+            with connect_pool() as conn:
+                stale = stale_key_kinds(conn, installed)
+            if not stale:
+                log.info("the crosswalk matches the installed mappings")
+                return 0
+            for kind, n in sorted(stale.items()):
+                log.warning("%s: %s crosswalk rows, declared by no mapping",
+                            kind, f"{n:,}")
+            log.warning("run `worker rebuild` to re-key the store from the "
+                        "landing zone; a backfill would duplicate these parties")
+            return 1
+
+        if args.command == "rebuild":
+            return _rebuild(connect_pool, mappings=installed)
+
+        with connect_pool() as conn:
+            stale = stale_key_kinds(conn, installed)
+        if stale:
+            log.error(
+                "refusing to backfill: %s carries crosswalk rows that no "
+                "installed mapping declares. Backfilling would mint a second "
+                "golden party for each of them rather than correcting the "
+                "first. Run `worker rebuild` instead.", sorted(stale)
+            )
+            return 1
         return _backfill(connect_pool)
 
     log.info("worker started on queue %r", args.queue)

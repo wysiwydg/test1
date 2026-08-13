@@ -141,6 +141,19 @@ worker.cmd serve
 Without it, batches sit in the queue until you press **Process queued batches
 now** on the ingestion console. Both do the same work.
 
+The worker's other subcommands:
+
+| | |
+|---|---|
+| `worker.cmd once` | drain one job and stop |
+| `worker.cmd mine` | propose standardization rules from what the model had to handle |
+| `worker.cmd check` | does the crosswalk still match the installed mappings? |
+| `worker.cmd backfill` | re-run every landed batch through the current pipeline |
+| `worker.cmd rebuild` | discard the derived store and recompute it from the landing zone |
+
+`check` and `backfill` change nothing you cannot repeat. `rebuild` is the one
+that deletes, and it is described under **Updating** below.
+
 To stop the database when you are finished:
 
 ```
@@ -164,21 +177,32 @@ The full walkthrough of each console is in
 You do not need this zip again. Nothing in it changes between releases except
 this project's own wheel — the PostgreSQL binaries, polars, scipy and the rest
 are byte-for-byte the same files. A release ships instead as an **update pack**
-of well under a megabyte, built with `python -m scripts.build_update_pack`.
+of a megabyte or two, built with `python -m scripts.build_update_pack`.
 
 Unzip it anywhere and point it at this folder:
 
 ```
-update.cmd  C:\path\to\cmdm-offline
+update.cmd  C:\path\to\cmdm-offline --check     see what would happen
+update.cmd  C:\path\to\cmdm-offline             do it
 ```
 
-It reinstalls the wheel from disk with `--no-index` — no network, on either
-end — replaces `src\`, `tests\`, `docs\` and `verify.py`, and keeps what it
-replaced in `backup-<timestamp>\`. It will not touch `pgdata\`, `pgpassword`
-or `config.cmd`: your database, your keys and your identifier-hashing secret
-are the irreplaceable part of an installation and no update has business
-there. It refuses outright if the release needs a package this bundle does not
-already carry, because an update pack cannot add compiled dependencies.
+Swapping the wheel is the easy part and, on its own, the wrong amount of work.
+A release can also change the schema and change what a stored identity *means*.
+Deploying only the code leaves an installation that starts, looks healthy and
+is wrong, so the updater does the whole deployment and reports each part:
+
+| | |
+|---|---|
+| **Check** | Is this a bundle, is it installed, does the release need a package it lacks. Nothing is written until all of these pass. |
+| **Back up** | Everything about to be replaced goes to `backup-<timestamp>\` first. |
+| **Files and wheel** | `src\`, `tests\`, `docs\`, `data\` and the root scripts, then `pip install --no-index` — nothing is fetched. |
+| **Schema** | Applies any migrations the release adds. A store one release behind otherwise fails on the first query rather than at start-up. |
+| **Identity** | Does the crosswalk still mean what the mappings say it means? See below. |
+| **Health** | Imports the installed package and counts the store, so the run ends on evidence. |
+
+It will not touch `pgdata\`, `pgpassword` or `config.cmd`: your database, your
+keys and your identifier-hashing secret are the irreplaceable part of an
+installation. It never deletes golden records.
 
 Then:
 
@@ -193,6 +217,45 @@ fills in the gap without you re-uploading a file — the bytes are already in th
 landing zone, which is why the landing zone is immutable and kept. It is
 idempotent: rows that are already right stay on the version they are on, and
 running it twice does nothing the second time.
+
+### If the updater says RE-KEYED
+
+A key kind is part of a party's identity. A release that changes one changes
+what every stored identity *means* — and nothing in the database is violated by
+that, so nothing else would ever report it. Backfilling after such a change
+does not correct the old rows: it mints a *second* golden party under the new
+key and leaves the first behind, so the affected customers double rather than
+resolve. `worker backfill` refuses for that reason, and names the alternative:
+
+```
+worker.cmd check          the finding on its own, with counts
+worker.cmd rebuild        discard the derived store and recompute it
+```
+
+`rebuild` deletes golden records, both crosswalks, provenance and the match
+ledger, then recomputes all of it from the delivered bytes. Everything it
+deletes is derived and everything it reads is immutable, so this is a
+recomputation and not a data loss. It dry-runs the pipeline over the most
+recent batch *before* deleting anything, so a rebuild that cannot succeed
+refuses instead of leaving you with an empty store.
+
+Two things do not survive it. Published person and policy ids change, so
+anything downstream holding them needs re-keying from the hand-back export.
+Steward decisions recorded against the old identities do not carry over.
+
+### A release can also need new data
+
+Some features can only be derived from columns the source has to send. If a
+backfill finds none of them it says so rather than silently producing nothing:
+
+```
+no households derived: none of the 15,000 landed party rows states how the
+parties are related. The extracts in the landing zone predate that column;
+households will appear when a file carrying it is submitted.
+```
+
+That is not an error. Submit an extract carrying the column and the feature
+fills in on the next run.
 
 ---
 

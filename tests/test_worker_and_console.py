@@ -477,3 +477,95 @@ def test_the_business_console_finds_a_processed_customer(console, store, process
     page = console(Role.ADMIN).get("/console", params={"q": name})
     assert page.status_code == 200
     assert "/console/person/" in page.text
+
+
+# ---------------------------------------------------------------------------
+# Deployment: re-key detection and rebuild
+# ---------------------------------------------------------------------------
+
+
+def test_a_key_kind_no_mapping_declares_is_reported(store, landed, processed, mapping):
+    """The failure this exists for breaks nothing in the database.
+
+    A key kind a mapping no longer declares is simply an identity nothing writes
+    to. Re-processing mints a second golden party beside it and the customer
+    quietly becomes two; no constraint is violated, so nothing else would ever
+    notice.
+    """
+    from cmdm.worker import stale_key_kinds
+
+    assert stale_key_kinds(store, [mapping]) == {}
+
+    store.execute(
+        "UPDATE mdm.person_xref SET source_key_kind = 'OLD_OWNER_ID' "
+        "WHERE source_key_kind = 'CUSTOMER_ID'"
+    )
+    stale = stale_key_kinds(store, [mapping])
+    assert "OLD_OWNER_ID" in stale and stale["OLD_OWNER_ID"] > 0
+
+
+def test_a_removed_mapping_does_not_hide_a_stale_kind(store, landed, processed):
+    """With no mappings installed at all, every key kind is stale. Better to
+    say so than to report a clean bill from an empty comparison."""
+    from cmdm.worker import stale_key_kinds
+
+    assert stale_key_kinds(store, []), "an empty mapping set reported nothing stale"
+
+
+def test_rebuild_recomputes_the_store_from_the_landing_zone(
+    migrated, store, landed, processed, mapping
+):
+    """The heavier upgrade path. Everything it deletes is derived; the delivered
+    bytes are immutable and still there, so this is a recomputation."""
+    import psycopg
+
+    from cmdm.worker import _rebuild
+
+    store.commit()
+
+    def connect_pool():
+        return psycopg.connect(migrated)
+
+    with psycopg.connect(migrated) as check:
+        before = check.execute(
+            "SELECT count(*) FROM mdm.person WHERE is_current"
+        ).fetchone()[0]
+    assert before
+
+    assert _rebuild(connect_pool, mappings=[mapping]) == 0
+
+    with psycopg.connect(migrated) as check:
+        after, landed_rows = check.execute(
+            "SELECT (SELECT count(*) FROM mdm.person WHERE is_current),"
+            "       (SELECT count(*) FROM mdm.source_record)"
+        ).fetchone()
+    assert after == before, "the rebuild did not reproduce the same book"
+    assert landed_rows, "the rebuild touched the landing zone"
+
+
+def test_rebuild_refuses_before_deleting_when_the_pipeline_cannot_run(
+    migrated, store, landed, processed, mapping
+):
+    """A rebuild that truncates and then fails leaves an empty store. The
+    delivered bytes are still there and re-running would fix it, but 'your
+    golden store is now zero rows' is not the message to put in front of
+    somebody at the moment they are least sure what they just did."""
+    import psycopg
+
+    from cmdm.worker import _rebuild
+
+    store.execute(
+        "UPDATE mdm.ingest_batch SET mapping_name = 'no_such_mapping'"
+    )
+    store.commit()
+
+    def connect_pool():
+        return psycopg.connect(migrated)
+
+    assert _rebuild(connect_pool, mappings=[mapping]) == 1
+
+    with psycopg.connect(migrated) as check:
+        survivors = check.execute(
+            "SELECT count(*) FROM mdm.person WHERE is_current"
+        ).fetchone()[0]
+    assert survivors, "the store was emptied by a rebuild that then refused"

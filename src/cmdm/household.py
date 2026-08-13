@@ -146,10 +146,17 @@ def load_graph_inputs(
             WHERE is_current AND NOT is_deleted
             """
         )
+        # Dtypes are stated, never inferred. Every column here is text in the
+        # database, but Polars types a row batch from the values it sees first,
+        # and these columns are legitimately null for long runs -- a store whose
+        # older batches predate a column has thousands of nulls before the first
+        # string. Inference calls that Null and then fails on the first real
+        # value, deep inside a frame constructor, with a message about builders.
         parties = pl.DataFrame(
             cur.fetchall() or [],
-            schema=["person_id", "party_type", "address_key", "surname_derived",
-                    "full_name"],
+            schema={"person_id": pl.String, "party_type": pl.String,
+                    "address_key": pl.String, "surname_derived": pl.String,
+                    "full_name": pl.String},
             orient="row",
         )
 
@@ -163,7 +170,8 @@ def load_graph_inputs(
         )
         edges = pl.DataFrame(
             cur.fetchall() or [],
-            schema=["person_id", "policy_id", "role", "stated_relationship"],
+            schema={"person_id": pl.String, "policy_id": pl.String,
+                    "role": pl.String, "stated_relationship": pl.String},
             orient="row",
         )
 
@@ -194,10 +202,18 @@ def _stated_pairs(edges: pl.DataFrame) -> pl.DataFrame:
         owners.join(insureds, on="policy_id", how="inner")
         .filter(pl.col("from_id") != pl.col("to_id"))
         .with_columns(
+            # Cast first, and state the output type. A store carrying only
+            # batches from before the source sent this column has it entirely
+            # null, which Polars types as Null rather than String -- and mapping
+            # strings onto a Null column fails on the *mapping's* values, not on
+            # the data's. The result is a rebuild that dies part-way with an
+            # error naming a vocabulary the operator never typed.
             pl.col("stated_relationship")
+            .cast(pl.String, strict=False)
             .replace_strict(
                 {k: (v.value if v else None) for k, v in STATED_TO_ASSOCIATION.items()},
                 default=None,
+                return_dtype=pl.String,
             )
             .alias("association_type")
         )

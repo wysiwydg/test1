@@ -197,10 +197,37 @@ class SourceMapping:
             cols.append(self.source_timestamp_field)
         return tuple(dict.fromkeys(cols))
 
+    @property
+    def optional_columns(self) -> tuple[str, ...]:
+        """Mapped columns whose absence degrades a feature but not the batch.
+
+        Only the stated-relationship column so far. It is supplementary
+        evidence rather than a canonical attribute: a source that starts
+        sending insurable interest next quarter should not make this quarter's
+        files unprocessable, and a source that never sends it should still land.
+
+        Absence is still *reported*, as a warning naming the column, because the
+        alternative -- an unread column producing no households and no
+        complaint -- is the silent failure this whole validation layer exists to
+        prevent.
+        """
+        return tuple(dict.fromkeys(
+            p.relationship_field for p in self.parties if p.relationship_field
+        ))
+
     def missing_columns(self, available: Sequence[str]) -> tuple[str, ...]:
-        """Mapped columns absent from an arriving file."""
+        """Required mapped columns absent from an arriving file."""
         present = set(available)
-        return tuple(c for c in self.source_columns if c not in present)
+        optional = set(self.optional_columns)
+        return tuple(
+            c for c in self.source_columns
+            if c not in present and c not in optional
+        )
+
+    def missing_optional_columns(self, available: Sequence[str]) -> tuple[str, ...]:
+        """Declared optional columns absent from an arriving file."""
+        present = set(available)
+        return tuple(c for c in self.optional_columns if c not in present)
 
 
 # ---------------------------------------------------------------------------

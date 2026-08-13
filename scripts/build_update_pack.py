@@ -36,11 +36,23 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 #: What an update replaces. The wheel is the software; the rest is what the
 #: bundle carries alongside it so the target can read and verify what it runs.
-PAYLOAD = ["src", "tests", "docs", "README.md"]
+#:
+PAYLOAD = ["src", "tests", "docs", "scripts", "README.md"]
+
+#: Named individually rather than by copying ``data/``. The sample extract is
+#: shipped content -- a release that adds a source column ships a sample
+#: carrying it, and leaving the old file behind makes ``verify`` fail on a
+#: bundle that is otherwise correct. But a developer's ``data/`` also collects
+#: benchmark inputs, and copying the directory wholesale put a 100 MB file in a
+#: pack whose entire reason for existing is that it is small.
+DATA_FILES = ["life_admin_sample.csv"]
 
 #: Taken from offline/. The updater and the scripts that launch it, plus the
-#: bundle-root files a release can change.
-SCRIPTS = ["update.py", "update.cmd", "update.sh", "verify.py", "OFFLINE-INSTALL.md"]
+#: bundle-root files a release can change. ``worker`` is in the list because a
+#: release can add a subcommand -- this one adds ``rebuild`` -- and the launcher
+#: has to be able to pass it through.
+SCRIPTS = ["update.py", "update.cmd", "update.sh", "verify.py",
+           "worker.cmd", "worker.sh", "OFFLINE-INSTALL.md"]
 
 
 def run(argv: list[str]) -> None:
@@ -105,6 +117,13 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
         else:
             shutil.copy2(source, target)
 
+    data = staging / "data"
+    data.mkdir()
+    for name in DATA_FILES:
+        source = REPO / "data" / name
+        if source.exists():
+            shutil.copy2(source, data / name)
+
     for name in SCRIPTS:
         source = REPO / "offline" / name
         if source.exists():
@@ -147,19 +166,21 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
 
 
 def _update_md(version: str) -> str:
-    return f"""# Updating an installed bundle to {version}
+    return f"""# Deploying {version} to an installed bundle
 
 You do not need the 150 MB bundle again. Nothing in it changed except this
-project's own wheel: the PostgreSQL binaries, polars, scipy and the rest are
-the same files you already have.
+project's own wheel: the PostgreSQL binaries, polars, scipy and the rest are the
+same files you already have.
 
-## Windows
+## Run it
+
+Windows:
 
 ```
 update.cmd  C:\\path\\to\\cmdm-offline
 ```
 
-## Linux / macOS
+Linux / macOS:
 
 ```
 ./update.sh  /path/to/cmdm-offline
@@ -167,30 +188,57 @@ update.cmd  C:\\path\\to\\cmdm-offline
 
 Give it the folder that contains `start.cmd` and `.venv`. With no argument it
 updates the bundle in the parent folder, which is right if you unzipped this
-pack inside it.
+pack inside it. Add `--check` to see what would happen and change nothing.
 
-The updater:
+## What it does
 
-1. checks the bundle is the thing it says it is, and that this update needs no
-   dependency the bundle does not already have;
-2. reinstalls the `cmdm` wheel from disk with `--no-index`, so nothing is
-   fetched;
-3. replaces `src/`, `tests/`, `docs/` and `verify.py`, keeping a copy of what
-   it replaced in `backup-<timestamp>/` beside the bundle;
-4. leaves your database, your API keys and your `config.cmd` untouched.
+1. **Checks** the target is an installed bundle and that this release needs no
+   package the bundle lacks. Nothing is written until that passes.
+2. **Backs up** everything it is about to replace into `backup-<timestamp>/`.
+3. **Replaces** `src/`, `tests/`, `docs/`, `data/` and the root scripts, then
+   installs the wheel with `--no-index` -- nothing is fetched.
+4. **Migrates** the schema. A store one release behind otherwise fails on the
+   first query rather than at start-up, which is a far worse place to find out.
+5. **Checks identity**: does the stored crosswalk still mean what the installed
+   mappings say it means? A release that changes a key kind changes what a
+   stored identity *is*, and nothing in the database is violated by that -- so
+   nothing else would ever report it.
+6. **Reports** the installed version and the size of the store, so the run ends
+   on evidence rather than on the absence of an error.
+
+It never touches `pgdata`, `pgpassword` or your config files, and it never
+deletes golden records.
 
 ## Then
 
 ```
-verify.cmd --quick            prove the machine still runs it
-worker.cmd backfill           bring the existing golden store forward
-start.cmd                     http://127.0.0.1:8000/console/entities
+verify.cmd --quick        prove the machine still runs it
+worker.cmd backfill       bring the existing golden store forward
+start.cmd                 http://127.0.0.1:8000/console/entities
 ```
 
 `backfill` re-runs every batch already in the landing zone through the current
-pipeline. It is what fills in anything this release computes that the previous
-one did not, without re-uploading a file. It is idempotent: an unchanged record
-stays one version, and running it twice does nothing the second time.
+pipeline. That is how a release which computes something the last one did not
+fills in the gap, without you re-uploading a file. It is idempotent: rows
+already correct stay on the version they are on.
+
+## If the updater reports RE-KEYED
+
+This release changed a key kind, so parties in your store are keyed on
+identities nothing writes to any more. **Do not backfill** -- it would mint a
+second golden party for each rather than correct the first, and the updater
+refuses to for that reason. Rebuild instead:
+
+```
+worker.cmd rebuild
+```
+
+That discards the derived store -- golden records, crosswalks, provenance, the
+match ledger -- and recomputes all of it from the delivered bytes in the landing
+zone, which are immutable and still there. It is a recomputation, not a data
+loss. Two things do not survive: published person and policy ids change, and
+steward decisions keyed on the old identities do not carry over. Run
+`worker.cmd check` first if you want to see the finding on its own.
 """
 
 

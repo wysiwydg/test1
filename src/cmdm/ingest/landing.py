@@ -175,6 +175,20 @@ def validate_batch(raw: pl.DataFrame, mapping: SourceMapping) -> ValidationRepor
         # cascade of errors that all restate this one.
         return report
 
+    absent = mapping.missing_optional_columns(raw.columns)
+    if absent:
+        report.issues.append(
+            ValidationIssue(
+                "WARNING",
+                "MISSING_OPTIONAL_COLUMNS",
+                f"Declared but absent: {', '.join(absent)}. The batch is "
+                "processed without them; households will not be derived from "
+                "this file because nothing in it states how the parties are "
+                "related.",
+                row_count=raw.height,
+            )
+        )
+
     policy_number_col = next(
         (f.source for f in mapping.policy if f.canonical == "policy_number" and f.source), None
     )
