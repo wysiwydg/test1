@@ -12,28 +12,30 @@ and probabilistic passes abstain.
 > entities, identity strategy, assumptions taken, open questions.
 > [`docs/02-vectorized-ingestion.md`](docs/02-vectorized-ingestion.md) — mapping,
 > normalization kernels, shredding, measured throughput.
-> [`docs/03-architecture.md`](docs/03-architecture.md) — the layering, runtime path,
-> where AI enters, code and storage maps.
+> [`docs/03-architecture.md`](docs/03-architecture.md) — the storage model, the
+> runtime path, and exactly where the two local models are reached from.
 > [`docs/04-operating-the-consoles.md`](docs/04-operating-the-consoles.md) — how to
 > run it: ingestion, stewardship and the business view, with the setup each needs.
+> [`docs/05-architecture-in-plain-language.md`](docs/05-architecture-in-plain-language.md)
+> — the same architecture for a business audience, with no code in it.
 
 ### Measured, not asserted
 
 | Stage | Result |
 |---|---|
-| Shredding | 37,700 policies/s |
-| Standardization | deterministic pass 85.3% → **100%** after one learning cycle; AI share 14.7% → **0%** |
-| Blocking | 1,553× pair reduction, 99.2% blocking recall |
-| Resolution | precision **0.991**, recall **0.780** vs generator ground truth |
-| Grey-zone model | contributes **46% of all true positives at 100% precision** |
-| Full pipeline | 5,000 policies → 2,711 golden persons in **3.2 s**, one transaction |
-| Re-processing | runs 2 and 3 write **0 changes**, 2,711 unchanged |
-| Duplicate check | **21 ms** mean, same engine as the batch run |
-| Work queue | 6 workers, 300 jobs, **zero overlapping claims** |
+| Shredding | 22,400 policies/s, one wide row → three grains |
+| Standardization | deterministic pass **86.4%**, gate pass **99.1%** after the model, AI share **13.0%** |
+| Blocking | 2.9M possible pairs → 11,787 candidates, **248× reduction** |
+| Grey zone | **1.05%** of candidate pairs reach a model; 41 merged, 83 held apart |
+| Vetoes | 1,789 pairs refused on conflicting DOB or person-vs-entity, whatever they scored |
+| Full pipeline | 5,000 policies → 2,386 golden persons, 15,000 edges, 598 households in **~5 s**, one transaction |
+| Re-processing | writes **0 changes**, 22,386 rows unchanged |
+| Householding | 598 households, **every one a single real family**, 0 flatmates wrongly included, 80.3% of real families found |
+| Audit | 11,787 pair decisions and 314 model invocations retained, **including every rejection** |
 
-All figures from `data/life_admin_sample.csv` (5,000 policies, 3,881 parties),
-against a real PostgreSQL 16 instance. Reproduce with
-`python -m scripts.generate_sample_data`.
+All figures from `data/life_admin_sample.csv` (5,000 policies, 2,419 source
+identities), against a real PostgreSQL 16 instance. Reproduce with
+`python -m scripts.generate_sample_data` then `./verify.sh`.
 
 ---
 
@@ -148,11 +150,13 @@ src/cmdm/sql/
     004_provenance_nullable.sql
     005_governance.sql      Principals, consent, erasure, audit
     006_match_pair_identity.sql  The ledger keys on what was compared
+    007_households.sql      Households, affiliations, stated relationships
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
-    03-architecture.md
+    03-architecture.md          Technical: storage, runtime path, the AI branches
     04-operating-the-consoles.md
+    05-architecture-in-plain-language.md   The same, for a business audience
 scripts/
     bootstrap.py            Migrations + one API key per console audience
 ```

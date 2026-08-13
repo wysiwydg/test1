@@ -1,223 +1,295 @@
 # Architecture
 
-The layout of the system as built. Every figure here was measured against a real
-PostgreSQL 16 instance on the 5,000-policy synthetic extract; reproduce with
-`python -m scripts.generate_sample_data`.
+Where the data lives, and where the models are allowed to touch it.
+
+A plain-language companion to this document is
+[`05-architecture-in-plain-language.md`](05-architecture-in-plain-language.md).
+It covers the same system for a business audience.
+
+Every number here is measured on the 5,000-policy reference extract in
+`data/life_admin_sample.csv`, not estimated. Reproduce them with
+`./verify.sh` or `python -m cmdm.worker backfill`.
+
+The architectural claim is not that AI is used. It is that **AI is a branch off
+the path rather than a stage on it** — and that every branch it takes is written
+down.
 
 | | |
 |---|---|
-| 44 Python modules | 13,594 lines |
-| 6 migrations | 1,843 lines SQL, 21 tables |
-| 428 tests | 4,540 lines, real Postgres |
+| Canonical entities | 3 |
+| Tables in the store | 21 |
+| Records seen by a model | **13.0%** |
+| Candidate pairs seen by a model | **1.05%** |
+| Model decisions logged | 100% |
 
 ---
 
-## 1. Layering
+## 1. The store
 
-Eleven packages in five bands. Dependencies run strictly downward — verified by
-walking the import graph, not by convention.
+Source data arrives at policy grain: one wide row per contract, carrying an
+owner, an insured and an agent side by side. The store holds three entities
+instead, because a party is not a property of a contract and a role is not a
+property of a party.
 
-```mermaid
-flowchart TD
-    subgraph EDGE[" "]
-        api["api/<br><small>7 endpoints</small>"]
-        ui["ui/<br><small>13 console routes</small>"]
-    end
-    subgraph ORCH[" "]
-        pipe["pipeline.py<br><small>composes the stages, owns no logic</small>"]
-        wrk["worker.py<br><small>claims jobs, mines rules</small>"]
-    end
-    subgraph ENGINES[" "]
-        ing["ingest/"]
-        std["standardize/"]
-        res["resolve/"]
-        sur["survive/"]
-        sto["store/"]
-        obs["observe/"]
-    end
-    subgraph SHARED[" "]
-        db["db/<br><small>pool · migrations · queue</small>"]
-        gov["governance/<br><small>rbac · privacy</small>"]
-        dep["deps.py<br><small>one auth path</small>"]
-    end
-    reg["model/ — the field registry<br><small>type · survivorship · match role · PII class</small>"]
+| Entity | Grain | Fields | Identity |
+|---|---|---|---|
+| **Policy** | One contract | 45 | Deterministic — policy number within a source system |
+| **Person** | One party, natural or legal | 57 | No natural key; identity lives in a crosswalk |
+| **Relationship** | One edge | 30 | The assertion a source made, or a derivation from several |
 
-    api --> pipe
-    ui --> wrk
-    wrk --> pipe
-    api --> dep
-    ui --> dep
-    api --> gov
-    ui --> gov
-    pipe --> ing & std & res & sur & sto
-    ing --> db
-    obs --> db
-    ing & std & res & sur & sto & gov & db --> reg
+Person deliberately has *no* unique index on any business column. Two people
+genuinely share a name and a date of birth; a database that forbids it is a
+database that will reject the truth. Identity is therefore a stored mapping —
+the crosswalk — rather than a constraint, and that mapping is what resolution
+writes.
+
+```
+  source_record ──shred──> policy ────FK──> policy_master ──> policy_xref
+  (immutable                person ────FK──> person_master ──> person_xref
+   landing zone)            relationship                       (system·kind·key
+        │                                                       → person_id)
+        │
+        └──────────────> attribute_provenance
+                         which source won each attribute, by which rule,
+                         traced back to the exact landed record
 ```
 
-**Why the registry is at the bottom.** It is pure standard library. A worker that
-only normalizes text never imports Arrow, Postgres or FastAPI to learn what a
-column means.
+Foreign keys point at the anchor tables (`*_master`) rather than the versioned
+tables: a surrogate key repeats once per version, so the partial unique index
+over current rows is not a legal foreign-key target. Relationship has no anchor
+because nothing references an edge.
 
-**One registry, three projections.** `model/fields.py` declares each attribute
-once. The 986-line Postgres DDL, the Arrow schemas and the API contracts are all
-generated from it, and a test regenerates the committed DDL and fails on drift.
-
-> An `api ↔ ui` import cycle existed until this document was written — it only
-> worked because the import was deferred inside `create_app()`. Removed by moving
-> the shared request dependencies down a band into `cmdm/deps.py`.
+Around those seven tables sit fourteen more: the work queue, the resolution
+ledger, the standardization exception log and rule store, consent and erasure
+records, the principal table and an append-only access log. Twenty-one in
+total, all generated from one field registry in `model/fields.py`, which also
+projects the Arrow schemas and the API contracts. A drift test regenerates the
+DDL and fails the build if the committed schema no longer matches.
 
 ---
 
 ## 2. Runtime path
 
-```mermaid
-flowchart LR
-    csv["CSV batch<br>POST /batches"] --> val{{"validate<br><small>synchronous</small>"}}
-    val -->|rejected| err["400 — which column,<br>which rows, examples"]
-    val -->|accepted| txn
-    subgraph txn["ONE TRANSACTION"]
-        direction TB
-        land["land raw rows"] --> enq["enqueue job"]
-    end
-    txn --> q[("work_queue<br><small>SKIP LOCKED</small>")]
-    q --> w["workers<br><small>N competing</small>"]
-    w --> s1["standardize"] --> s2["resolve"] --> s3["survive"] --> s4["write"]
-    s4 --> gold[("golden store")]
-    s1 -.->|gate failures only| m1["local model"]
-    s2 -.->|grey zone only| m2["cross-encoder"]
+A batch is validated and landed synchronously; everything after that is a
+queued job.
+
+```
+ land ─> shred ─> standardize ─> resolve ─> survive ─> write ─> household
+                       │             │
+                  13.0% of      1.05% of
+                   records        pairs
+                       ↓             ↓
+              local standardizer   grey-zone classifier
+              ONNX int8 · CPU      cross-encoder
+                       │             │
+                  returns,      returns, stamped ──> steward queue
+                  stamped                            (a person decides;
+                                                      next run applies it)
 ```
 
-Landing the rows and enqueueing the job are **one commit**. With a separate
-broker they are two, and the window between them is where a batch becomes
-accepted-but-lost — the API returns 202, the publish fails, and the data sits in
-a table nothing will ever read.
+Both AI detours **leave a stage and return to the same stage**. Six of the seven
+stages never reach a model at all. The two that can are the ones where the
+cheap, vectorized answer is structurally unavailable: separating a given name
+from a surname in a string nobody agreed the format of, and judging whether
+`Bob` and `Robert` are the same person.
 
-Verified: six workers draining 300 jobs claimed 300 with zero overlaps.
-
-### The six stages
-
-| # | Stage | What it does | Where |
-|---|---|---|---|
-| 01 | **Land** | Every row verbatim, content-addressed. Only mapped columns kept. | `ingest/landing.py` |
-| 02 | **Shred** | One policy row → 1 Policy, N Person, N Relationship. 37,700 policies/s. | `ingest/shred.py` |
-| 03 | **Standardize** | Vectorized kernels → quality gate → local fallback → rule mining. | `standardize/` |
-| 04 | **Resolve** | Blocking (1,553×) → tri-zone scoring → cross-encoder → graph merge. | `resolve/` |
-| 05 | **Survive** | Registry-declared rule per attribute, one group-by, full lineage. | `survive/engine.py` |
-| 06 | **Write** | SCD-2, never in place. Identical rewrite is a no-op. | `store/writer.py` |
+**The economic argument.** A model that sees every record costs in proportion
+to how much data there is. A model that sees only what the deterministic pass
+could not handle costs in proportion to how *messy* the data is. Those are
+different quantities, and only the second falls when the feeds improve.
 
 ---
 
-## 3. Where AI enters
+## 3. AI, per record: the quality gate
 
-Two places, both gated, both audited. Model cost tracks how *ambiguous* the data
-is, not how much of it there is.
+After the vectorized pass, twelve declared checks run as a single Polars
+expression over the batch — one pass, regardless of how many checks exist. Each
+names a field, a predicate and a reason. A record that passes every check never
+touches a model.
 
-### Standardization — per record
+The checks answer *"is this usable"*, not *"is this correct"*. The gate cannot
+know whether `JOHN SMITH` is the right name. It can know that a name which
+produced no phonetic key cannot be blocked on, and that a party the matcher
+cannot block on is a party the matcher will silently never compare.
 
-```mermaid
-flowchart LR
-    all["all records<br>3,412"] --> gate{{"quality gate<br><small>11 checks</small>"}}
-    gate -->|"85.3% pass"| det["never touches a model"]
-    gate -->|"14.7% fail"| ai["local model<br><small>per record</small>"]
-    ai --> mine["mine patterns<br><small>≥25 occurrences</small>"]
-    mine --> shadow["shadow eval → steward → rule<br><small>0 regressions required</small>"]
-    shadow -->|approved rules rejoin| gate
+```
+  2,419 party records
+        │
+      [gate · 12 checks]
+        ├─ passes every check ──────> 2,089   86.4% · no model, ever ─┐
+        ├─ name unparseable ────────>   314   13.0% · to the model ───┤
+        └─ date of birth implausible >    21   logged, not invented    │
+                                                                      ↓
+                                                    2,398 usable · 99.1%
 ```
 
-Measured, same batch on a second run: **AI share 14.7% → 0.0%**, 502 records
-permanently retired from the model path, zero regressions.
+The 21 records the model cannot help are not silently dropped. A date of birth
+outside a plausible range is a data problem, and inventing one would be worse
+than recording that it is missing.
 
-### Resolution — per candidate pair
+**What the standardizer is.** Two implementations behind one protocol.
+`OnnxStandardizer` runs a small sequence-labelling model quantized to int8 on
+CPU — no network call, no per-token billing, no data leaving the host, which
+matters because these are precisely the records carrying the messiest personal
+data. `HeuristicStandardizer` is a real second implementation, not a stub: it
+resolves initials, particled surnames, comma-inverted order and run-together
+addresses with branchy logic that does not vectorize. The numbers above were
+produced by the heuristic path, which is the accuracy floor a real model has to
+beat.
 
-```mermaid
-flowchart LR
-    pairs["all pairs<br>7.5M possible"] --> blk["blocking<br><small>5 keys · 1,553×</small>"]
-    blk --> score["scoring<br><small>11 comparators</small>"]
-    score -->|"≥ 0.85"| am["AUTO-MATCH<br>632 · merged"]
-    score -->|"0.50–0.85"| grey["GREY<br>1,260 · 26%"]
-    score -->|"< 0.50"| ar["AUTO-REJECT<br>2,955 · logged"]
-    grey --> ce["cross-encoder<br><small>537 approved, 100% precision</small>"]
+Inference is per-record and deliberately not optimized. If one shape of input
+becomes common enough for that to hurt, that is the signal the mining agent
+watches for, and the answer is a deterministic rule rather than a faster model.
+
+---
+
+## 4. AI, per pair: the grey zone
+
+Resolution never compares all pairs. Blocking generates candidates from keys
+computed at ingest — sorted name tokens, a phonetic key, an address key — which
+turns 2.9 million possible pairs into 11,787 candidates, a reduction of 248:1.
+Each candidate is scored by vectorized comparators and lands in one of three
+zones.
+
+```
+  score  0.00 ─────────────── 0.50 ────── 0.85 ────── 1.00
+         │  11,663 auto-reject  │ 124 grey │  0 auto-match
+         │  no model            │  1.05%   │
+                                     ↓
+                            cross-encoder, accepts at ≥ 0.70
+                                     ├──> 41 merged
+                                     └──> 83 held apart
+
+  1,789 pairs vetoed — conflicting DOB, or person vs legal entity.
+  A veto outranks any score, including the model's.
 ```
 
-The grey zone is a first-class outcome, not a failure. A binary threshold forces
-a call on every pair including the ones the evidence cannot support; a three-way
-split lets the cheap scorer decline. On this run the cross-encoder contributed
-**46% of all true positives at 100% precision**.
-
----
-
-## 4. Storage
-
-21 tables in one `mdm` schema, five forward-only migrations. Three of these
-groups exist so the other two can be explained.
-
-| Group | Tables | Why |
+| Threshold | Value | Why there |
 |---|---|---|
-| **Canonical entities** | `policy` `person` `relationship` | The golden records. SCD-2, one current version per identity enforced by a partial unique index. |
-| **Identity anchors** | `policy_master` `person_master` | Versioned tables can't back a foreign key — the surrogate repeats per version — so every FK targets these. Also where a merged-away id keeps existing. |
-| **Evidence** | `source_record` `person_xref` `policy_xref` `attribute_provenance` | Where every golden value came from. The crosswalk is where identity actually lives. |
-| **Decisions** | `match_pair` `resolution_run` `match_audit` `standardization_exception` `standardization_rule` | Every resolution decision *including rejections*, every AI invocation, every learned rule with its shadow results. `match_pair` is keyed on the *source identities* compared, not on golden ids: resolution runs before golden ids exist, and an auto-match collapses both sides into one. |
-| **Pipeline** | `work_queue` `ingest_batch` | The queue, in the same database so accept-and-enqueue is one commit. |
-| **Governance** | `principal` `access_log` `steward_action` `consent` `erasure_request` | `access_log` refuses UPDATE and DELETE at the database. |
+| Auto-match | ≥ 0.85 | Merged without review. High, because an unmerged duplicate is visible and a wrong merge is not. |
+| Auto-reject | < 0.50 | Recorded and dropped. The rejections are kept — "why did these *not* merge" is asked as often as the reverse. |
+| Model accepts | ≥ 0.70 | Above 0.5 deliberately. A grey-zone pair is one the deterministic evidence could not support, so the model must be confident rather than merely inclined. |
+| Mining evidence | ≥ 25 | Occurrences of one pattern before a rule is even proposed. |
 
-`001_golden_schema.sql` is generated from the registry and drift-tested. `002`–`006`
-are hand-written operational machinery — putting queue plumbing into the registry
-that describes what a Person *is* would be a category error.
+Auto-match is zero on this extract because the mapping declares one
+customer-number space: parties sharing a customer number are collapsed
+deterministically before scoring runs, so nothing is left for probability to
+rediscover.
+
+Clustering is transitive: accepted pairs form a graph and connected components
+become master records. That transitivity is why the input is restricted to
+pairs the pipeline actually accepted — one wrong edge silently unions two
+clusters, and the damage is proportional to the size of both. Components above
+a size threshold are flagged rather than trusted.
 
 ---
 
-## 5. Process topology
+## 5. The learning loop
 
-| Process | Serves | Scaling |
+Everything the fallback handles is logged with the check it failed and a
+structural signature of the input. The mining agent groups those exceptions,
+and a signature recurring at least 25 times becomes a candidate rule — *data,
+never code*. The worst a bad rule can do is rewrite a string badly.
+
+```
+  exceptions ─> PROPOSED ─> SHADOW ─> APPROVED ─> ACTIVE
+  (what the     a mined     tested on  by a       in the
+   model saw)   regex       past data  steward    fast pass
+       ↑                       │                     │
+       └───────────────────────┼─────────────────────┘
+                               │      next run: these records
+                               │      never reach a model again
+                    the database refuses an ACTIVE rule that was
+                    never shadow-tested or that regressed anything
+```
+
+Shadow evaluation is the step that matters, and it is why auto-promotion was
+rejected. Normalization that rewrites itself into production unreviewed can
+corrupt every record it touches *uniformly* — and uniform corruption is the
+hardest kind to notice, because nothing looks anomalous relative to anything
+else.
+
+The agent is a pattern miner rather than a language model writing regexes
+freehand. A generated regex that is *nearly* right is more dangerous than one
+that is obviously wrong: it passes review and then quietly mangles a shape
+nobody anticipated. Mined patterns are narrow by construction, each anchored to
+the exact token shape it came from.
+
+---
+
+## 6. What the models are never allowed to do
+
+| Boundary | Enforced by |
+|---|---|
+| Never mints, merges or retires an identity | Clustering runs on accepted pairs; the crosswalk is written by the pipeline, not by a model |
+| Never overrides a veto | Conflicting dates of birth, or a natural person against a legal entity, refuse the pair whatever it scored |
+| Never promotes its own rule | A steward approves, with a reason, and the database refuses an untested ACTIVE rule |
+| Never writes a golden value directly | Survivorship is registry-driven; the model supplies a candidate value like any other source |
+| Never leaves the host | ONNX Runtime on CPU. No network call, no per-token billing, no data egress |
+| Never decides without saying so | Engine name and version are written onto every decision |
+
+The last one is what makes the rest checkable. Every grey-zone verdict lands in
+`match_pair` with its score, its zone and the engine that produced it; every
+fallback invocation lands in `standardization_exception` with the checks it
+failed. On the reference extract that is 11,787 pair decisions and 314
+exceptions retained — including the 11,663 rejections, because "why were these
+two *not* merged" is asked as often as the opposite and is unanswerable after
+the fact if only the merges were kept.
+
+**Reproducibility.** Re-processing the same batch writes nothing: 22,386 rows
+unchanged, zero changed. The golden writer compares a content hash over
+business fields only, so audit columns moving does not manufacture a version.
+Both models write their name and version onto their decisions, so a run can be
+explained months later without reference to deployment configuration nobody
+recorded.
+
+---
+
+## 7. Households: derived without a model, on purpose
+
+Householding is the place where a model would be the obvious reach, and it is
+deliberately not used. Insurable interest is a condition of issue, so a life
+administration system records at application that the owner is the insured's
+spouse, parent or child. That statement is evidence. A shared postcode is not.
+
+Households are therefore the connected components over *stated* family
+relations only, with address used to corroborate and never to admit a member.
+Measured against the reference extract's own ground truth: 598 households
+derived, every one of them a single real family, no flatmate wrongly included,
+and 80.3% of real families of two or more found intact. The 20% not found are
+families whose members never appear together on a policy with a stated
+relationship — no evidence, no household, which is the right answer rather than
+a guess.
+
+Affiliations to companies, trusts and estates are counted separately
+throughout, because a company insuring forty staff is not a household of
+forty-one.
+
+---
+
+## 8. Process topology
+
+| Process | What it does | Scaling |
 |---|---|---|
-| `uvicorn cmdm.api.app:app` | REST API, both consoles, `/metrics` | Horizontal. Stateless; one pooled connection and one transaction per request. |
-| `python -m cmdm.worker serve` | Claims from `work_queue`, runs stages 02–06 | Horizontal. SKIP LOCKED gives disjoint claims; leases return a crashed worker's jobs. Each job is its own connection and transaction, so a bad batch cannot roll back the ones already finished. |
-| `python -m cmdm.worker mine` | Mines the exception log, proposes and shadow-tests rules | Scheduled, single instance. Proposes only — a steward approves. Offline rather than on the ingest path: it reads the whole exception corpus, so per-batch mining would repeat one global scan per file. |
+| API / console (`uvicorn`) | Validates and lands batches, serves reads, renders the consoles | Stateless; scale horizontally |
+| Worker (`python -m cmdm.worker serve`) | Claims jobs with `FOR UPDATE SKIP LOCKED`, runs the pipeline | Add processes; the queue arbitrates |
+| PostgreSQL | The golden store, the landing zone, the queue and the audit trail | The single stateful component |
 
-The ingestion console can also drain the queue in-request, bounded to a few
-jobs. That is a manual nudge for a deployment with no worker running, not a
-second code path — it calls the same `drain()`.
-
----
-
-## 6. What the numbers rest on
-
-- **No pretrained model was ever loaded.** The environment blocks model downloads,
-  so both AI paths run real ONNX graphs built locally and both fallbacks are
-  genuine second implementations rather than stubs. A real MiniLM cross-encoder's
-  accuracy here is **unmeasured** — 0.991 / 0.780 belong to the feature encoder.
-- **Ground truth is synthetic.** Two generator flaws had to be fixed before the
-  numbers meant anything: emails derived from names alone gave different people
-  identical addresses (precision read 0.687 until found), and organization owners
-  inherited a person's customer id, penalising the matcher for correctly refusing
-  to merge a company with a human.
-- **Recall is a dial, not a result.** 0.780 reflects an AI acceptance threshold of
-  0.70 trading against 0.991 precision. Blocking recall is 99.2%, so the ceiling
-  is not the constraint — the threshold is, and it should be set against real data
-  and a real tolerance for false merges.
+Each job is its own transaction and its own connection. A worker that shared
+one transaction across jobs would turn any single bad batch into a rollback of
+every batch it had already finished, which is precisely the failure the queue
+exists to contain.
 
 ---
 
-## 7. What re-running has to preserve
+## What re-running has to preserve
 
-A steward's verdict only takes effect on the next run, and the ingestion console
-puts a "process" button in front of an operator. Both make re-processing routine
-rather than exceptional, and that turns idempotence from a nicety into a
-correctness requirement. Three things had to change for it to hold:
-
-| | Was | Is |
-|---|---|---|
-| **Golden ids** | minted fresh per run | read from the crosswalk, minted only for clusters it has never seen |
-| **Tie-breaks** | `source_record_id` | the identity triple — one policy row yields an owner, an insured *and* an agent, so the record id alone ties |
-| **Derived values** | ranked independently of their parent | taken from the record that won `derived_from` |
-
-The second and third were not merely non-deterministic, they were wrong. Polars
-group-by is threaded, so a tie fell through to whatever row order the run
-happened to produce: a customer's name changed overnight with no source change
-behind it. And `full_name` and `full_name_normalized` picking separately left
-290 of 2,712 records findable only under a name their own record did not show —
-search, blocking and every comparator read the normalized form.
-
-Measured on the reference batch: runs two and three write `changed=0,
-unchanged=2,711`, and 0 of 2,711 derived values disagree with their parent.
+1. **Golden ids are stable.** They come from the crosswalk, never minted fresh
+   for an identity already known.
+2. **An unchanged record is not a new version.** Change detection is a content
+   hash over business fields only.
+3. **Rejections survive.** The match ledger keeps what it refused, not only
+   what it merged.
+4. **A retired id still resolves.** Merge pointers keep published ids working.
+5. **The landing zone is never rewritten.** It is what every later release
+   recomputes from.
