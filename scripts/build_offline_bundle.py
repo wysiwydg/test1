@@ -48,6 +48,17 @@ PGSERVER_BUILD_PYTHON = "3.12"
 #: to run.
 PAYLOAD = ["src", "tests", "scripts", "docs", "pyproject.toml", "README.md"]
 
+#: The updater belongs to an update pack, not to a bundle, and is deliberately
+#: left out of one.
+#:
+#: A bundle that carried it would carry the copy that existed on the day it was
+#: built, and an update pack cannot replace it: the updater excludes itself from
+#: its own payload, because a script overwriting itself mid-run is not a thing
+#: to arrange. So the bundle would keep a stale updater at its root forever, for
+#: somebody to eventually run. Deployment is: unzip the pack, run the updater
+#: *it* carries.
+UPDATER = {"update.py", "update.cmd", "update.sh"}
+
 
 def run(argv: list[str]) -> None:
     result = subprocess.run(argv, cwd=REPO)
@@ -93,7 +104,7 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
         # Files only. A __pycache__ turns up there the moment anything imports
         # one of these scripts, and copying it as a file fails the whole build
         # on the last step before the zip.
-        if script.is_file():
+        if script.is_file() and script.name not in UPDATER:
             shutil.copy2(script, staging / script.name)
 
     _checksums(staging)

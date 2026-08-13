@@ -58,23 +58,37 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 
-#: Replaced wholesale. Everything here is shipped content, reproducible from the
-#: wheel and the repository; nothing in it is machine state.
-#:
-#: ``data`` is in the list because the sample extract is shipped content too,
-#: and a release that adds a source column ships a sample carrying it. Leaving
-#: the old file behind makes ``verify`` fail on a bundle that is otherwise
-#: correct, which reads as a broken release.
-DIRECTORIES = ["src", "tests", "docs", "data"]
+#: This script's own machinery, which belongs to the pack and not to the bundle.
+#: Everything else in the pack is payload.
+OWN = {"update.py", "update.cmd", "update.sh", "UPDATE.md", "DEPENDENCIES.txt",
+       "MANIFEST.sha256", "wheels", "__pycache__"}
 
-#: Replaced if the pack carries them.
-FILES = ["verify.py", "README.md", "OFFLINE-INSTALL.md", "worker.cmd", "worker.sh"]
-
-#: Never touched, by anything, ever. Listed so the intent is checkable rather
-#: than implied by the absence of code that would have written to them, and
-#: asserted in the test suite against DIRECTORIES and FILES.
+#: Never touched, by anything, ever. The database, the generated superuser
+#: password, the identifier-hashing key, the installed packages and the
+#: PostgreSQL binaries. Checked against the payload at run time rather than
+#: trusted, so a pack that somehow carried one of these names is refused instead
+#: of overwriting it.
 PRESERVED = ["pgdata", "pgpassword", "config.cmd", "config.sh", ".venv",
              "wheels", "pgsql"]
+
+
+def payload(pack: pathlib.Path | None = None) -> list[pathlib.Path]:
+    """Everything in this pack that belongs in the bundle.
+
+    Derived from what the pack actually contains rather than from a list kept
+    here. The two used to be separate lists in separate files -- the builder
+    decided what shipped, this decided what was installed -- and they drifted
+    the first time a release added a directory: the pack carried ``scripts/``,
+    this did not name it, so the new test suite landed beside the old generator
+    it imports from and the bundle failed its own verification with an
+    ImportError. A pack that carries a file nobody installs is a silent, and the
+    only way to not have that bug is to not have the second list.
+    """
+    pack = pack or HERE
+    return sorted(
+        (p for p in pack.iterdir() if p.name not in OWN),
+        key=lambda p: (p.is_file(), p.name),
+    )
 
 
 def say(message: str) -> None:
@@ -187,6 +201,14 @@ def _check(bundle: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | int:
     if wheel is None:
         return fail(f"no cmdm wheel in {HERE / 'wheels'}")
 
+    protected = [p.name for p in payload() if p.name in PRESERVED]
+    if protected:
+        return fail(
+            f"this pack carries {', '.join(protected)}, which an update must "
+            "never write over. That is your database, your keys or your "
+            "installed packages. Refusing rather than deciding which."
+        )
+
     return python, wheel
 
 
@@ -196,22 +218,18 @@ def _replace_files(bundle: pathlib.Path) -> pathlib.Path:
     backup.mkdir()
     say(f"keeping what is replaced in {backup.name}/")
 
-    for name in DIRECTORIES:
-        source = HERE / name
-        if not source.is_dir():
-            continue
+    for source in payload():
+        name = source.name
         existing = bundle / name
-        if existing.is_dir():
-            shutil.move(str(existing), str(backup / name))
-        shutil.copytree(source, existing,
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        say(f"replaced {name}/")
 
-    for name in FILES:
-        source = HERE / name
-        if not source.exists():
+        if source.is_dir():
+            if existing.is_dir():
+                shutil.move(str(existing), str(backup / name))
+            shutil.copytree(source, existing,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            say(f"replaced {name}/")
             continue
-        existing = bundle / name
+
         if existing.exists():
             shutil.copy2(existing, backup / name)
         shutil.copy2(source, existing)
@@ -378,7 +396,8 @@ def main(argv: list[str]) -> int:
 
     if args.check:
         say(f"would install {wheel.name}")
-        say(f"would replace {', '.join(DIRECTORIES)} and {', '.join(FILES)}")
+        names = [f"{p.name}/" if p.is_dir() else p.name for p in payload()]
+        say(f"would replace {', '.join(names)}")
         say(f"would not touch {', '.join(PRESERVED)}")
         # Read against this pack's source, so the answer is about the release
         # being deployed rather than about the one already installed.
@@ -400,7 +419,7 @@ def main(argv: list[str]) -> int:
     if installed.returncode != 0:
         return fail(
             f"pip exited {installed.returncode}. Nothing else was changed; the "
-            f"previous {', '.join(DIRECTORIES)} are in {backup.name}/."
+            f"previous files are in {backup.name}/."
         )
 
     if args.skip_migrations:

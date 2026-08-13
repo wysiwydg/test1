@@ -128,10 +128,15 @@ def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    replaced = set(module.DIRECTORIES) | set(module.FILES)
-    assert not replaced & set(module.PRESERVED)
-    for name in ("pgdata", "config.cmd", "config.sh", ".venv", "wheels", "pgsql"):
+    for name in ("pgdata", "pgpassword", "config.cmd", "config.sh", ".venv",
+                 "wheels", "pgsql"):
         assert name in module.PRESERVED
+
+    # The payload is whatever the pack holds, so the guarantee cannot be a
+    # static comparison of two lists -- it is that the updater refuses a pack
+    # carrying any of these names rather than deciding which one to overwrite.
+    assert "PRESERVED" in pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    assert set(module.OWN) >= {"update.py", "wheels", "MANIFEST.sha256"}
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +201,74 @@ def test_the_edge_assertion_is_stated_as_a_relationship() -> None:
     source = (pathlib.Path(module.__file__)).read_text(encoding="utf-8")
     assert "result.policies * 3" in source
     assert "edges == 15000" not in source
+
+
+def test_the_updater_installs_whatever_the_pack_carries(tmp_path) -> None:
+    """The bug this replaces: the builder shipped `scripts/` and the updater's
+    hardcoded list did not name it, so the pack carried a directory nobody
+    installed. New tests landed beside the old generator they import ground
+    truth from, and the bundle failed its own verification with an ImportError
+    after an update that had reported success.
+
+    Two lists in two files that must agree will drift. This asserts there is
+    only one: whatever is in the pack, minus the updater's own machinery.
+    """
+    module = _update_module()
+
+    for name in ("src", "tests", "scripts", "pyproject.toml", "a_future_release_dir"):
+        (tmp_path / name).mkdir() if "." not in name else (tmp_path / name).touch()
+    for name in module.OWN:
+        target = tmp_path / name
+        target.mkdir() if name in ("wheels", "__pycache__") else target.touch()
+
+    carried = {p.name for p in module.payload(tmp_path)}
+    assert "a_future_release_dir" in carried, (
+        "the updater skipped a directory the pack carried; it is keeping its "
+        "own list again"
+    )
+    assert carried == {"src", "tests", "scripts", "pyproject.toml",
+                       "a_future_release_dir"}
+
+
+def test_the_pack_ships_what_the_test_suite_needs_to_run(tmp_path) -> None:
+    """The bundle runs this suite to verify itself, and the suite imports the
+    sample generator for ground truth and reads pytest settings from
+    pyproject. A pack without them installs tests that cannot run."""
+    from scripts.build_update_pack import PAYLOAD
+
+    assert "tests" in PAYLOAD
+    assert "scripts" in PAYLOAD, "the suite imports the sample generator"
+    assert "pyproject.toml" in PAYLOAD, "it carries the pytest configuration"
+
+
+def _update_module():
+    import importlib.util
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = next(
+        (c for c in (root / "offline" / "update.py", root / "update.py") if c.exists()),
+        None,
+    )
+    if source is None:  # pragma: no cover - neither layout
+        pytest.skip("update.py not present in this layout")
+    spec = importlib.util.spec_from_file_location("cmdm_update", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_bundle_does_not_carry_the_updater() -> None:
+    """It would carry the copy that existed the day it was built, and an update
+    pack cannot replace it -- the updater excludes itself from its own payload,
+    since a script overwriting itself mid-run is not a thing to arrange. A
+    bundle keeping a stale updater at its root is one somebody eventually runs.
+    """
+    from scripts.build_offline_bundle import UPDATER
+
+    assert set(UPDATER) >= {"update.py", "update.cmd", "update.sh"}
+
+    module = _update_module()
+    assert not set(module.OWN) & {"verify.py", "worker.cmd", "worker.sh"}, (
+        "the updater is excluding a bundle script from its payload; only its "
+        "own machinery belongs in OWN"
+    )

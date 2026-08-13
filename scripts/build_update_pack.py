@@ -37,7 +37,14 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: What an update replaces. The wheel is the software; the rest is what the
 #: bundle carries alongside it so the target can read and verify what it runs.
 #:
-PAYLOAD = ["src", "tests", "docs", "scripts", "README.md"]
+#: ``scripts`` is here because the test suite reads ground truth from the sample
+#: generator, so a pack shipping new tests beside an old generator fails on
+#: import. ``pyproject.toml`` is here because it carries the pytest
+#: configuration, including the warning filters -- a release that silences a
+#: warning has not silenced it anywhere the target can see until this file
+#: arrives. Both were found the same way: by a bundle failing its own
+#: verification after an update that reported success.
+PAYLOAD = ["src", "tests", "docs", "scripts", "README.md", "pyproject.toml"]
 
 #: Named individually rather than by copying ``data/``. The sample extract is
 #: shipped content -- a release that adds a source column ships a sample
