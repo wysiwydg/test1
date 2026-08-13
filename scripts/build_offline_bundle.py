@@ -90,7 +90,11 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
     shutil.copy2(REPO / "data" / "life_admin_sample.csv", data)
 
     for script in sorted((REPO / "offline").iterdir()):
-        shutil.copy2(script, staging / script.name)
+        # Files only. A __pycache__ turns up there the moment anything imports
+        # one of these scripts, and copying it as a file fails the whole build
+        # on the last step before the zip.
+        if script.is_file():
+            shutil.copy2(script, staging / script.name)
 
     _checksums(staging)
     return _zip(staging, out_dir)
