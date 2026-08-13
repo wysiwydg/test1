@@ -418,8 +418,14 @@ def test_payload_hash_detects_redelivery() -> None:
     assert payload_hash(payload) != payload_hash({**payload, "OwnerName": "JANE SMITH"})
 
 
-def test_keyed_identifier_hash_requires_a_key() -> None:
-    """An unkeyed digest of a nine-digit identifier is trivially reversible."""
+def test_keyed_identifier_hash_requires_a_key(monkeypatch) -> None:
+    """An unkeyed digest of a nine-digit identifier is trivially reversible.
+
+    The variable is removed rather than assumed absent. A deployment that has
+    exported it -- which is every real one, and the offline bundle's verifier --
+    would otherwise see this test fail for the one reason that is not a defect.
+    """
+    monkeypatch.delenv("CMDM_ID_HASH_KEY", raising=False)
     with pytest.raises(RuntimeError, match="CMDM_ID_HASH_KEY"):
         keyed_identifier_hash("123-45-6789", id_type="SSN", key=None)
 

@@ -165,15 +165,13 @@ class FeatureCrossEncoder:
     def __init__(self, model_path: str | Path | None = None) -> None:
         self._session = None
         if model_path is not None:
-            import onnxruntime as ort
+            from cmdm.onnx import load_session
 
-            path = Path(model_path)
-            if not path.exists():
-                raise FileNotFoundError(f"cross-encoder model not found at {path}")
-            options = ort.SessionOptions()
-            options.intra_op_num_threads = 1
-            self._session = ort.InferenceSession(
-                str(path), sess_options=options, providers=["CPUExecutionProvider"]
+            self._session, _ = load_session(
+                model_path,
+                what="cross-encoder model",
+                hint="Leave it unset to score from features instead.",
+                optimize=False,
             )
             self._input_name = self._session.get_inputs()[0].name
 
@@ -254,19 +252,14 @@ class OnnxCrossEncoder:
         version: str = "1",
         max_batch: int = 64,
     ) -> None:
-        import onnxruntime as ort
+        from cmdm.onnx import load_session
 
         path = Path(model_path)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"cross-encoder model not found at {path}. Set CMDM_CROSS_ENCODER_MODEL, "
-                "or leave it unset to use the feature cross-encoder."
-            )
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 1
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self._session = ort.InferenceSession(
-            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        self._session, _ = load_session(
+            path,
+            what="cross-encoder model",
+            hint="Set CMDM_CROSS_ENCODER_MODEL, or leave it unset to use the "
+                 "feature cross-encoder.",
         )
         self._tokenizer = tokenizer
         self._max_batch = max_batch

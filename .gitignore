@@ -13,3 +13,9 @@ venv/
 
 # Generated sample data. Recreate with: python -m scripts.generate_sample_data
 data/
+
+dist/
+.venv/
+pgdata/
+config.cmd
+config.sh

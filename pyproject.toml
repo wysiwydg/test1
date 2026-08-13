@@ -19,36 +19,48 @@ dependencies = []
 [project.optional-dependencies]
 # Vectorized layer: Arrow-backed column operations for normalization, blocking,
 # comparator scoring and survivorship.
+#
+# scipy and numpy are here rather than in an extra of their own because
+# resolve/clustering.py imports them at module scope -- the transitive closure
+# is resolved by connected components over a sparse adjacency matrix, and there
+# is no vectorized path without it. They were undeclared until an offline
+# install was attempted, which is the first thing that actually checks.
 vector = [
     "pyarrow>=16",
     "polars>=1.0",
-    "duckdb>=1.0",
+    "numpy>=1.26",
+    "scipy>=1.13",
 ]
 
-# ACID golden store.
+# ACID golden store. The pool is a separate distribution from psycopg itself
+# and db/engine.py imports it at module scope, so it is named explicitly
+# rather than hoped for.
 store = [
     "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
 ]
 
-# API server.
+# API server, and the Prometheus exposition /metrics renders.
 api = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
+    "uvicorn>=0.30",
     "pydantic>=2.8",
+    "python-multipart>=0.0.9",
+    "prometheus-client>=0.20",
 ]
 
-# String similarity and normalization kernels used by the matching stage.
-match = [
-    "rapidfuzz>=3.9",
-    "jellyfish>=1.1",
-    "phonenumbers>=8.13",
+# Self-contained PostgreSQL, for a machine that has none and may not install
+# one. Optional: a deployment with its own instance sets CMDM_DSN and skips it.
+embedded = [
+    "pgserver>=0.1.4",
 ]
 
-# Local open-source models for the fallback path. Invoked only on the undecided
-# band, never on the whole population.
+# Local open-source models for the fallback path, invoked only on the undecided
+# band. Optional in the strongest sense: with no model file present both AI
+# paths fall back to their reference implementations, which are pure Python,
+# and onnxruntime is never imported.
 ai = [
-    "sentence-transformers>=3.0",
-    "llama-cpp-python>=0.3",
+    "onnxruntime>=1.18",
 ]
 
 dev = [
@@ -56,6 +68,11 @@ dev = [
     "pglast>=6.0",
     "ruff>=0.6",
     "mypy>=1.11",
+]
+
+# Everything the system actually needs to run.
+all = [
+    "cmdm[vector,store,api,embedded]",
 ]
 
 [tool.hatch.build.targets.wheel]

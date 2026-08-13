@@ -302,21 +302,15 @@ class OnnxStandardizer:
         version: str = "1",
         intra_op_threads: int = 1,
     ) -> None:
-        import onnxruntime as ort
+        from cmdm.onnx import load_session
 
         path = Path(model_path)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"ONNX model not found at {path}. Set CMDM_STANDARDIZER_MODEL to a "
-                "model file, or leave it unset to use the heuristic fallback."
-            )
-
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = intra_op_threads
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-        self._session = ort.InferenceSession(
-            str(path), sess_options=options, providers=["CPUExecutionProvider"]
+        self._session, _ = load_session(
+            path,
+            what="ONNX model",
+            hint="Set CMDM_STANDARDIZER_MODEL to a model file, or leave it unset "
+                 "to use the heuristic fallback.",
+            intra_op_threads=intra_op_threads,
         )
         self._tokenizer = tokenizer
         self._inputs = [i.name for i in self._session.get_inputs()]

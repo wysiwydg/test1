@@ -44,10 +44,21 @@ def dsn_from_env() -> str:
     ``CMDM_DSN`` wins when set. Otherwise the standard ``PG*`` variables are
     used, so the service behaves like any other Postgres client and inherits
     whatever the deployment already configures.
+
+    With neither set, and only then, the embedded instance is used if it is
+    installed -- which is what lets an offline install start with nothing
+    configured. It is last, not first: a machine that has told us where its
+    database is must never be quietly given a different one.
     """
     dsn = os.environ.get("CMDM_DSN")
     if dsn:
         return dsn
+
+    if not any(v in os.environ for v in ("PGHOST", "PGPORT", "PGUSER", "PGDATABASE")):
+        embedded = _embedded_dsn()
+        if embedded:
+            return embedded
+
     host = os.environ.get("PGHOST", "localhost")
     port = os.environ.get("PGPORT", "5432")
     user = os.environ.get("PGUSER", "postgres")
@@ -57,6 +68,25 @@ def dsn_from_env() -> str:
     if password:
         parts.append(f"password={password}")
     return " ".join(parts)
+
+
+def _embedded_dsn() -> str | None:
+    """The embedded instance's DSN, or None when it is not installed.
+
+    Cached in the environment so that the API server, the worker and a script
+    run in the same shell all resolve to the same instance without each paying
+    the start-up check.
+    """
+    try:
+        from cmdm.embedded import ensure_dsn
+    except ImportError:  # pragma: no cover - embedded extra not installed
+        return None
+    try:
+        dsn = ensure_dsn()
+    except RuntimeError:
+        return None
+    os.environ["CMDM_DSN"] = dsn
+    return dsn
 
 
 def pool(dsn: str | None = None, *, min_size: int = 1, max_size: int = 10) -> ConnectionPool:
