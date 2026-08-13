@@ -64,8 +64,36 @@ pages, and finally runs the whole test suite. Expect roughly this:
    9. PASS  the test suite passes                   (all tests green)
 ```
 
-Any `FAIL` is a real problem and prints the reason. Take about a minute for the
-whole run.
+Any `FAIL` is a real problem and prints the reason.
+
+**How long it should take.** Each step announces itself before it runs and
+prints its own elapsed time, so you can always see what it is doing. On a quiet
+Linux box the whole run is about 30 seconds; **on Windows expect two to five
+times that**, and longer again if antivirus is inspecting the PostgreSQL
+binaries and the sample extract as they are read.
+
+Step 9 — the 441-test suite — is the slow one by a wide margin. Every test that
+touches the database opens a connection, and on Windows that is a TCP
+connection rather than a Unix socket, so this step alone can run for several
+minutes. Steps 1 to 8 have already exercised the whole system end to end, so if
+you only want to know whether the machine can run it:
+
+```
+verify.cmd --quick
+```
+
+That skips the test suite and finishes in well under a minute.
+
+**If it looks stuck**, the step it is on tells you where to look:
+
+| Stuck on | Check |
+|---|---|
+| 3, the database starting | `pgdata\server.log`, and whether a firewall prompt is waiting behind another window — the server binds `127.0.0.1` |
+| 5 or 6, the pipeline | Task Manager: `postgres.exe` should be busy. 5,000 policies is real work |
+| 9, the tests | Normal. Use `--quick` if you do not need it |
+
+`python -m cmdm.embedded status` reports whether the server is initialised and
+running, from another Command Prompt.
 
 ---
 

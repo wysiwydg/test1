@@ -30,27 +30,48 @@ os.environ.setdefault("CMDM_ID_HASH_KEY", "verify-only-not-for-production")
 FAILURES: list[str] = []
 STEP = 0
 
+#: Roughly how long each step takes on a quiet Linux box, in seconds. Printed
+#: alongside the step so that "slow" can be told apart from "hung" -- which is
+#: the only question anybody has while watching a long-running check. Windows
+#: is typically two to five times slower, and slower again where antivirus is
+#: inspecting the PostgreSQL binaries and the 5,000-row batch as they are read.
+BASELINE = {
+    1: 0.1, 2: 1, 3: 1, 4: 0.2, 5: 4, 6: 3, 7: 0.2, 8: 0.2, 9: 21,
+}
+
 
 def step(name: str):
-    """Decorator running one check, reporting PASS or FAIL, never raising."""
+    """Run one check, reporting PASS or FAIL, never raising.
+
+    The step's name is printed *before* it runs, not after. A check that only
+    announces itself on completion leaves a blank terminal during the slowest
+    part of the run, which reads as a hang.
+    """
 
     def wrap(fn):
         def run():
             global STEP
             STEP += 1
+            expected = BASELINE.get(STEP, 1)
+            # Written without a trailing newline so the result lands on the
+            # same line. No carriage-return redrawing: this output is as often
+            # piped to a file or read through a scrollback as watched live, and
+            # a repainted line is unreadable in both.
+            print(f"  {STEP:>2}. {name} ... ", end="", flush=True)
             started = time.perf_counter()
             try:
                 detail = fn() or ""
             except Exception as exc:
                 FAILURES.append(name)
-                print(f"  {STEP:>2}. FAIL  {name}")
+                print("FAIL")
                 print(f"          {type(exc).__name__}: {exc}")
                 for line in traceback.format_exc().splitlines()[-4:-1]:
                     print(f"          {line.strip()}")
                 return
-            ms = (time.perf_counter() - started) * 1000
+            seconds = time.perf_counter() - started
+            slow = "  <-- slower than expected" if seconds > expected * 8 else ""
             suffix = f"  ({detail})" if detail else ""
-            print(f"  {STEP:>2}. PASS  {name}{suffix}  [{ms:.0f} ms]")
+            print(f"PASS{suffix}  [{seconds:.1f}s]{slow}")
 
         return run
 
@@ -229,9 +250,18 @@ def check_consoles() -> str:
 
 @step("the test suite passes")
 def check_tests() -> str:
+    """The long one, and the only step that is optional.
+
+    It is 441 tests, most of which open a database transaction. On Windows
+    every one of those is a TCP connection rather than a Unix socket, so this
+    step alone can take several minutes where it takes twenty seconds
+    elsewhere. Steps 1-8 have already exercised the whole system end to end;
+    this is the belt to their braces, and --quick skips it.
+    """
     import pytest
 
     os.environ["CMDM_TEST_DSN"] = os.environ["CMDM_DSN"]
+    print()  # pytest writes its own progress dots below
     code = pytest.main(
         [str(HERE / "tests"), "-q", "-p", "no:cacheprovider",
          "--rootdir", str(HERE), "-x"]
@@ -241,16 +271,29 @@ def check_tests() -> str:
 
 
 def main() -> int:
+    quick = "--quick" in sys.argv or "-q" in sys.argv
+
     print("\nCustomer MDM — verifying this machine can run it\n")
     print(f"  bundle:  {HERE}")
     print(f"  python:  {sys.version.split()[0]}")
-    print(f"  data:    {os.environ['CMDM_HOME']}\n")
+    print(f"  data:    {os.environ['CMDM_HOME']}")
+    total = sum(BASELINE.values()) - (BASELINE[9] if quick else 0)
+    print(f"  expect:  around {total:.0f}s on a quiet Linux box; two to five "
+          "times that on Windows\n")
 
-    for check in (
+    checks = [
         check_offline, check_imports, check_postgres, check_migrations,
-        check_pipeline, check_idempotent, check_api, check_consoles, check_tests,
-    ):
+        check_pipeline, check_idempotent, check_api, check_consoles,
+    ]
+    if quick:
+        print("  (--quick: skipping the test suite, which is the slow step)\n")
+    else:
+        checks.append(check_tests)
+
+    started = time.perf_counter()
+    for check in checks:
         check()
+    elapsed = time.perf_counter() - started
 
     print()
     if FAILURES:
@@ -262,7 +305,8 @@ def main() -> int:
 
     ext = "cmd" if platform.system() == "Windows" else "sh"
     prefix = "" if platform.system() == "Windows" else "./"
-    print("  Everything passed. The system runs on this machine with no network.\n")
+    print(f"  Everything passed in {elapsed:.0f}s. The system runs on this "
+          "machine with no network.\n")
     print(f"  Start it:            {prefix}start.{ext}"
           "    then open http://127.0.0.1:8000/console")
     print(f"  Drain the queue:     {prefix}worker.{ext} serve\n")
