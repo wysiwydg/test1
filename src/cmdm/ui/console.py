@@ -754,11 +754,22 @@ def steward_queue(
         for pair in pairs:
             verdict = pair["ai_decision"] or "—"
             ai_score = "" if pair["ai_score"] is None else f"{pair['ai_score']:.2f}"
+            # Three outcomes, not two. A pair the model rejected can still end
+            # up merged, because connected components joined the two sides
+            # through some *other* pair. Labelling that "merged" next to a
+            # NO_MATCH verdict reads as a contradiction and sends the steward
+            # looking for a bug; naming it is also the only way they can tell a
+            # transitive merge from a direct one, which is what they would want
+            # to review.
             merged = pair["left_person_id"] == pair["right_person_id"]
-            outcome = (
-                '<span class="zone-AUTO_MATCH">merged</span>' if merged
-                else '<span class="zone-AUTO_REJECT">kept apart</span>'
-            )
+            if not merged:
+                outcome = '<span class="zone-AUTO_REJECT">kept apart</span>'
+            elif pair["final_decision"] == "MATCH":
+                outcome = '<span class="zone-AUTO_MATCH">merged</span>'
+            else:
+                outcome = (
+                    '<span class="zone-GREY">merged via another pair</span>'
+                )
             action = (
                 f'<form method="post" action="/console/steward/decide">'
                 f'<input type="hidden" name="pair_id" value="{pair["pair_id"]}">'
