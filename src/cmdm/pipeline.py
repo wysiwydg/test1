@@ -32,8 +32,9 @@ import polars as pl
 import psycopg
 
 from cmdm.ingest.mapping import SourceMapping
+from cmdm.ingest.normalize import normalize_policy_number
 from cmdm.ingest.shred import shred
-from cmdm.model.fields import PERSON, POLICY
+from cmdm.model.fields import PERSON, POLICY, RELATIONSHIP
 from cmdm.model.ids import uuid7
 from cmdm.resolve import (
     AUTO_MATCH_THRESHOLD,
@@ -44,7 +45,7 @@ from cmdm.resolve import (
     resolve,
 )
 from cmdm.standardize import StandardizationReport, standardize
-from cmdm.store import upsert_xref, write_entities
+from cmdm.store import upsert_policy_xref, upsert_xref, write_entities
 from cmdm.store.writer import resolve_person_id
 from cmdm.survive import SourceTrust, SurvivorshipReport, survive
 
@@ -69,6 +70,7 @@ class PipelineResult:
     survivorship: SurvivorshipReport | None = None
     writes: dict[str, dict[str, Any]] = field(default_factory=dict)
     xref_rows: int = 0
+    policy_xref_rows: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +84,7 @@ class PipelineResult:
             "survivorship": self.survivorship.as_dict() if self.survivorship else None,
             "writes": self.writes,
             "xref_rows": self.xref_rows,
+            "policy_xref_rows": self.policy_xref_rows,
         }
 
 
@@ -230,6 +233,196 @@ def _golden_policy_ids(
     )
 
 
+def _link_policies(
+    conn: psycopg.Connection,
+    raw: pl.DataFrame,
+    policies: pl.DataFrame,
+    mapping: SourceMapping,
+) -> int:
+    """Record which delivered policy numbers became which golden policy.
+
+    Built from the raw frame rather than the shredded one because the shredder
+    deduplicates on the normalized number: a file carrying ``POL-001234`` and
+    ``POL1234`` yields one policy row, and only one of those two strings
+    survives on it. Both were delivered, and both have to resolve when the
+    extract is handed back with its MDM ids.
+
+    The normalization runs here as the same Polars expression the shredder
+    used, so the two cannot disagree -- which they would if the join were
+    re-implemented in SQL against the stored normalized column.
+    """
+    column = next(
+        (f.source for f in mapping.policy if f.canonical == "policy_number" and f.source),
+        None,
+    )
+    if column is None or column not in raw.columns:
+        return 0
+
+    delivered = (
+        raw.select(
+            pl.col(column).cast(pl.String, strict=False).alias("source_policy_key")
+        )
+        .filter(
+            pl.col("source_policy_key").is_not_null()
+            & (pl.col("source_policy_key").str.strip_chars().str.len_chars() > 0)
+        )
+        .with_columns(
+            normalize_policy_number(pl.col("source_policy_key")).alias(
+                "policy_number_normalized"
+            )
+        )
+        .unique()
+    )
+
+    links = delivered.join(
+        policies.select("policy_id", "policy_number_normalized"),
+        on="policy_number_normalized",
+        how="inner",
+    ).with_columns(pl.lit(mapping.source_system).alias("source_system"))
+
+    return upsert_policy_xref(
+        conn, links.select("policy_id", "source_system", "source_policy_key")
+    )
+
+
+def _golden_relationship_ids(
+    conn: psycopg.Connection, edges: pl.DataFrame
+) -> pl.DataFrame:
+    """Attach the golden edge id, reusing the one already issued.
+
+    An edge's identity is the assertion the source made: this key, in this
+    namespace, in this role, at this ordinal, on this policy. Deliberately not
+    keyed on ``from_person_id`` — a merge moves the person id under the edge,
+    and an identity that moved with it would close every edge of the losing
+    party and open a new one, which is a rewrite of the servicing history to
+    record a fact about *identity* rather than about the world.
+
+    ``source_party_key`` is coalesced on both sides because an unidentified
+    party is a legitimate edge, and a NULL would never equal itself in the join.
+    """
+    keys = edges.select(
+        "source_system", "source_key_kind", "source_party_key",
+        "to_policy_id", "role", "role_sequence",
+    )
+
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS _edge_probe")
+        cur.execute(
+            """
+            CREATE TEMP TABLE _edge_probe (
+                source_system text, source_key_kind text, source_party_key text,
+                to_policy_id uuid, role text, role_sequence smallint
+            ) ON COMMIT DROP
+            """
+        )
+        with cur.copy(
+            "COPY _edge_probe (source_system, source_key_kind, source_party_key, "
+            "to_policy_id, role, role_sequence) FROM STDIN"
+        ) as copy:
+            for row in keys.iter_rows():
+                copy.write_row(row)
+
+        cur.execute(
+            """
+            SELECT p.source_system, p.source_key_kind, p.source_party_key,
+                   p.to_policy_id, p.role, p.role_sequence, r.relationship_id
+            FROM _edge_probe p
+            JOIN mdm.relationship r
+              ON r.source_system    = p.source_system
+             AND coalesce(r.source_key_kind, '')  = coalesce(p.source_key_kind, '')
+             AND coalesce(r.source_party_key, '') = coalesce(p.source_party_key, '')
+             AND r.to_policy_id = p.to_policy_id
+             AND r.role = p.role::mdm.party_role
+             AND r.role_sequence IS NOT DISTINCT FROM p.role_sequence
+            WHERE r.is_current AND r.edge_kind = 'PARTY_POLICY'
+            """
+        )
+        known = {
+            (r[0], r[1] or "", r[2] or "", str(r[3]), r[4], r[5]): str(r[6])
+            for r in cur.fetchall()
+        }
+
+    return edges.with_columns(
+        pl.Series(
+            "relationship_id",
+            [
+                known.get(
+                    (system, kind or "", key or "", str(policy), role, sequence)
+                ) or str(uuid7())
+                for system, kind, key, policy, role, sequence in keys.iter_rows()
+            ],
+        )
+    )
+
+
+def _write_relationships(
+    conn: psycopg.Connection,
+    edges: pl.DataFrame,
+    contributors: pl.DataFrame,
+    policies: pl.DataFrame,
+) -> dict[str, Any]:
+    """Resolve the shredded edges onto golden ids and version them.
+
+    The shredder leaves edges carrying source keys only, because resolving them
+    to surrogate ids there would mean guessing at identity before matching has
+    run. This is where they are resolved, in the same transaction that wrote the
+    entities they point at — an edge that outlived its endpoints, or preceded
+    them, would be a dangling reference in a store whose whole purpose is that
+    the graph is answerable.
+
+    An edge whose party or policy did not resolve is dropped rather than written
+    with a null endpoint: ``from_person_id`` is NOT NULL and the target check
+    constraint requires a policy, so a half-resolved edge is not a representable
+    row. In practice both joins are total — every party in the frame went
+    through resolution and every policy through the golden writer — and a
+    shortfall means an earlier stage lost rows.
+    """
+    if edges.height == 0:
+        return {}
+
+    parties = contributors.select(
+        "source_system", "source_key_kind", "source_party_key", "person_id"
+    ).unique()
+
+    resolved = (
+        edges.join(
+            parties,
+            on=["source_system", "source_key_kind", "source_party_key"],
+            how="inner",
+        )
+        .join(
+            policies.select("source_system", "policy_number_normalized", "policy_id"),
+            on=["source_system", "policy_number_normalized"],
+            how="inner",
+        )
+        .rename({"person_id": "from_person_id", "policy_id": "to_policy_id"})
+        .filter(
+            pl.col("from_person_id").is_not_null()
+            & pl.col("to_policy_id").is_not_null()
+        )
+        .with_columns(
+            # A sourced edge is evidenced by exactly the one policy that
+            # asserted it. evidence_policy_ids stays empty: the column names the
+            # policies behind a *derived* edge, and repeating to_policy_id into
+            # it would make a stated fact look like an inference.
+            pl.lit(1, dtype=pl.Int32).alias("evidence_count"),
+            pl.lit("DETERMINISTIC").alias("derivation_method"),
+        )
+        .unique(
+            subset=[
+                "source_system", "source_key_kind", "source_party_key",
+                "to_policy_id", "role", "role_sequence",
+            ]
+        )
+    )
+
+    if resolved.height == 0:
+        return {}
+
+    resolved = _golden_relationship_ids(conn, resolved)
+    return write_entities(conn, resolved, RELATIONSHIP).as_dict()
+
+
 def run_pipeline(
     conn: psycopg.Connection,
     raw: pl.DataFrame,
@@ -326,6 +519,15 @@ def run_pipeline(
         policies = _golden_policy_ids(conn, policies)
         policy_write = write_entities(conn, policies, POLICY)
         result.writes["policy"] = policy_write.as_dict()
+        result.policy_xref_rows = _link_policies(conn, raw, policies, mapping)
+
+        # Edges last of the three: they reference both of the others, and the
+        # frame they are resolved against only exists once those are written.
+        relationship_write = _write_relationships(
+            conn, frames["relationship"], contributors, policies
+        )
+        if relationship_write:
+            result.writes["relationship"] = relationship_write
 
     links = contributors.select(
         "person_id", "source_system", "source_key_kind", "source_party_key"

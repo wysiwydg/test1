@@ -124,6 +124,15 @@ class EntitySpec:
     fields: Sequence[FieldSpec]
     #: Natural key used for deterministic identity within a source system.
     natural_key: Sequence[str] = ()
+    #: Whether this entity's identity has an anchor table (``<table>_master``).
+    #:
+    #: Anchors exist so that other tables can point at an identity: a versioned
+    #: table repeats its surrogate key once per version, and the partial unique
+    #: index over current versions is not a legal foreign-key target in
+    #: Postgres. An entity nothing references does not need one, and paying for
+    #: a second row per edge to satisfy a constraint no table declares would be
+    #: a cost with nothing on the other side of it.
+    has_anchor: bool = True
 
     def __post_init__(self) -> None:
         names = [f.name for f in self.fields]
@@ -1186,6 +1195,11 @@ RELATIONSHIP = EntitySpec(
         ),
         *_lineage_fields("relationship"),
     ],
+    # No anchor table: nothing in the schema holds a foreign key to a
+    # relationship_id. Person and Policy identities are pointed at from the
+    # crosswalks and from the edges themselves; an edge is pointed at by
+    # nothing, so it is versioned without one.
+    has_anchor=False,
 )
 
 

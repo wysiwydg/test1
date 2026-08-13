@@ -48,6 +48,7 @@ __all__ = [
     "WriteReport",
     "write_entities",
     "upsert_xref",
+    "upsert_policy_xref",
     "resolve_person_id",
     "fill_required_defaults",
 ]
@@ -218,22 +219,26 @@ def write_entities(
         payload.append((entity_id, digest, row))
 
     with conn.cursor() as cur:
-        # -- anchors first. Referential integrity points here, and an entity
-        #    version cannot exist before the identity it belongs to.
-        cur.execute("DROP TABLE IF EXISTS _anchor_stage")
-        cur.execute(
-            "CREATE TEMP TABLE _anchor_stage (id uuid, created_at timestamptz) ON COMMIT DROP"
-        )
-        with cur.copy("COPY _anchor_stage (id, created_at) FROM STDIN") as copy:
-            for entity_id, _, _ in payload:
-                copy.write_row((entity_id, now))
-        cur.execute(
-            f"""
-            INSERT INTO mdm.{anchor_table} ({id_column}, created_at, is_active)
-            SELECT id, created_at, true FROM _anchor_stage
-            ON CONFLICT ({id_column}) DO NOTHING
-            """
-        )
+        # -- anchors first, for the entities that have one. Referential
+        #    integrity points there, and an entity version cannot exist before
+        #    the identity it belongs to. Edges have no anchor because nothing
+        #    references an edge; see EntitySpec.has_anchor.
+        if spec.has_anchor:
+            cur.execute("DROP TABLE IF EXISTS _anchor_stage")
+            cur.execute(
+                "CREATE TEMP TABLE _anchor_stage (id uuid, created_at timestamptz) "
+                "ON COMMIT DROP"
+            )
+            with cur.copy("COPY _anchor_stage (id, created_at) FROM STDIN") as copy:
+                for entity_id, _, _ in payload:
+                    copy.write_row((entity_id, now))
+            cur.execute(
+                f"""
+                INSERT INTO mdm.{anchor_table} ({id_column}, created_at, is_active)
+                SELECT id, created_at, true FROM _anchor_stage
+                ON CONFLICT ({id_column}) DO NOTHING
+                """
+            )
 
         # -- stage the new versions.
         column_ddl = ", ".join(f"{c} text" for c in columns if c != id_column)
@@ -433,6 +438,62 @@ def upsert_xref(
                               confidence = EXCLUDED.confidence
             """,
             (linked_by, derivation_method),
+        )
+        return cur.rowcount
+
+
+def upsert_policy_xref(
+    conn: psycopg.Connection,
+    links: pl.DataFrame,
+    *,
+    derivation_method: str = "DETERMINISTIC",
+) -> int:
+    """Point source policy numbers at their golden policy.
+
+    The counterpart of :func:`upsert_xref` for contracts, and the join that
+    makes it possible to hand a source system back its own extract with MDM
+    ids attached. Without it the only link from a delivered row to its golden
+    policy is the normalized policy number, which means re-implementing the
+    normalization in SQL and hoping the two agree.
+
+    Keyed on the policy number *as delivered*, not as normalized. Two rows
+    reading ``POL-001234`` and ``POL1234`` are one contract and one golden id,
+    but they are two different strings in two different source files, and both
+    have to resolve.
+    """
+    if links.height == 0:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS _policy_xref_stage")
+        cur.execute(
+            """
+            CREATE TEMP TABLE _policy_xref_stage (
+                policy_id uuid, source_system text, source_policy_key text
+            ) ON COMMIT DROP
+            """
+        )
+        with cur.copy(
+            "COPY _policy_xref_stage (policy_id, source_system, source_policy_key) "
+            "FROM STDIN"
+        ) as copy:
+            for row in links.iter_rows(named=True):
+                copy.write_row((
+                    row["policy_id"], row["source_system"], row["source_policy_key"],
+                ))
+
+        cur.execute(
+            """
+            INSERT INTO mdm.policy_xref
+                (xref_id, policy_id, source_system, source_policy_key,
+                 is_active, linked_at, derivation_method)
+            SELECT gen_random_uuid(), s.policy_id, s.source_system,
+                   s.source_policy_key, true, now(), %s::mdm.derivation_method
+            FROM _policy_xref_stage s
+            ON CONFLICT (source_system, source_policy_key)
+                DO UPDATE SET policy_id = EXCLUDED.policy_id, is_active = true
+            """,
+            (derivation_method,),
         )
         return cur.rowcount
 

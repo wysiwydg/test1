@@ -126,6 +126,7 @@ src/cmdm/api/
     app.py          Read/search, submit, real-time duplicate check, /metrics
 src/cmdm/ui/
     console.py      Ingestion, steward and business consoles, server-rendered
+src/cmdm/export.py      Entity dashboard, and the delivered extract with MDM ids
 src/cmdm/observe/
     metrics.py      Operational, match-quality and data-quality metrics
 src/cmdm/pipeline.py    End-to-end orchestration
@@ -171,6 +172,8 @@ python -m cmdm.worker serve             # drains the ingest queue
 - `/console/login` — paste a key; it becomes an HttpOnly session cookie
 - `/console/ingest` — submit a batch, watch it land, process the queue
 - `/console` — business console: search, golden record, lineage
+- `/console/entities` — what is in Person, Policy and Relationship, and a browser
+- `/console/export` — the delivered extract back with MDM ids, or golden records
 - `/console/steward` — grey-zone review queue
 - `/console/rules` — learned-rule approvals (`python -m cmdm.worker mine` fills it)
 - `/console/quality` — completeness and conformity

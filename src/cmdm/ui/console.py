@@ -35,7 +35,7 @@ from typing import Annotated, Any
 import polars as pl
 from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from fastapi import File as FileParam
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from psycopg.rows import dict_row
 
 from cmdm.deps import SESSION_COOKIE, ConnectionDep, PrincipalDep, require
@@ -91,6 +91,16 @@ a { color: var(--accent); }
 .zone-AUTO_MATCH { color: var(--good); } .zone-GREY { color: var(--warn); }
 .zone-AUTO_REJECT { color: var(--muted); }
 .masked { color: var(--muted); font-style: italic; }
+/* A uuid is 36 characters and wraps to four lines in a narrow column, which
+   triples the height of every row in the browser. Monospace and no-wrap keeps
+   the whole id on one line and still selectable, which truncating would not. */
+.id { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+  white-space: nowrap; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Ten columns of an entity are wider than the column of text the rest of the
+   console is set in. The table scrolls inside this rather than pushing the
+   page sideways, which would move the navigation off screen with it. */
+.wide { overflow-x: auto; }
 form.search { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
 input, select, textarea { background: var(--bg); color: var(--fg);
   border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; font: inherit; }
@@ -129,6 +139,9 @@ def _page(title: str, principal: Principal, body: str, *, active: str = "") -> H
     nav = []
     if principal.may(Action.SEARCH):
         nav.append(link("/console", "Customers", "business"))
+        nav.append(link("/console/entities", "Entities", "entities"))
+    if principal.may(Action.EXPORT):
+        nav.append(link("/console/export", "Export", "export"))
     if principal.may(Action.SUBMIT):
         nav.append(link("/console/ingest", "Ingestion", "ingest"))
     if principal.may(Action.MERGE):
@@ -456,6 +469,290 @@ def person_detail(
     body.append("</tbody></table>")
 
     return _page("Customer", principal, "".join(body), active="business")
+
+# ---------------------------------------------------------------------------
+# Entity dashboard
+# ---------------------------------------------------------------------------
+
+
+@router.get("/entities", response_class=HTMLResponse)
+def entities(
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+    show: Annotated[str, Query(max_length=20)] = "",
+    page: Annotated[int, Query(ge=0, le=100000)] = 0,
+) -> HTMLResponse:
+    """What is actually in the three entities, and a way into each.
+
+    The canonical model has three entities and until now the console showed
+    one of them. A business owner asking "what is in there" was being answered
+    about Person only, which is the entity the matching happens to be about
+    rather than the one the data arrives as.
+    """
+    _guard(principal, Action.SEARCH, conn)
+
+    from cmdm.export import PAGE_SIZE, browse_entity, entity_names, entity_overview
+
+    totals = entity_overview(conn)
+    log_access(conn, principal, Action.SEARCH, entity_name="EntityDashboard",
+               record_count=int(totals.get("persons") or 0))
+
+    body = [
+        "<h2>The canonical model</h2>",
+        '<p class="note">Three entities. Policy is the grain the data arrives '
+        "in; Person is what resolution collapses to; Relationship is the "
+        "role-bearing edge between them.</p>",
+        _metric(totals.get("policies"), "Policies"),
+        _metric(totals.get("persons"), "Golden persons"),
+        _metric(totals.get("relationships"), "Relationships"),
+        _metric(totals.get("landed_rows"), "Landed source rows"),
+    ]
+
+    body.append("<h2>Person</h2>")
+    body.append(_metric(totals.get("natural_persons"), "Natural persons"))
+    body.append(_metric(totals.get("legal_entities"), "Trusts, estates, companies"))
+    body.append(_metric(totals.get("multi_source_persons"), "Built from 2+ sources"))
+    body.append(_metric(totals.get("revised_persons"), "Revised since first write"))
+    body.append(_metric(totals.get("person_keys"), "Source keys crosswalked"))
+
+    body.append("<h2>Policy and Relationship</h2>")
+    body.append(_metric(totals.get("policy_sources"), "Source systems"))
+    body.append(_metric(totals.get("policy_keys"), "Policy keys crosswalked"))
+    body.append(_breakdown("Roles on the edge", totals.get("by_role", []), "role"))
+    body.append(
+        _breakdown("Policy status", totals.get("by_status", []), "policy_status")
+    )
+    body.append(_breakdown("Party type", totals.get("by_party_type", []), "party_type"))
+
+    names = entity_names()
+    # Policy by default: it is the grain the data arrives in, and a dashboard
+    # that opens on counts alone answers "how much" when the question asked was
+    # "what is in there".
+    show = show or names[0]
+
+    body.append("<h2>Browse</h2><p>")
+    for name in names:
+        weight = ' style="font-weight:650"' if name == show else ""
+        body.append(f'<a href="/console/entities?show={name}"{weight}>'
+                    f"{name.title()}</a> &nbsp; ")
+    if principal.may(Action.EXPORT):
+        body.append(f'&nbsp;·&nbsp; <a href="/console/export/entity/{show}.csv">'
+                    f"Download all {_esc(show)} records</a>")
+    body.append("</p>")
+
+    if show in names:
+        rows, total = browse_entity(conn, show, principal=principal, page=page)
+        body.append(
+            f'<p class="note">{total:,} current {show} rows. '
+            f"Showing {page * PAGE_SIZE + 1:,}–"
+            f"{min((page + 1) * PAGE_SIZE, total):,}.</p>"
+        )
+        if rows and not principal.may_unmask:
+            body.append('<p class="note">Personal fields are masked for your '
+                        "role. An OPERATOR or STEWARD sees them unmasked.</p>")
+        if rows:
+            columns = list(rows[0])
+            body.append('<div class="wide"><table><thead><tr>')
+            body.extend(f"<th>{_esc(c)}</th>" for c in columns)
+            body.append("</tr></thead><tbody>")
+            for row in rows:
+                body.append("<tr>")
+                for column in columns:
+                    body.append(_browse_cell(column, row[column]))
+                body.append("</tr>")
+            body.append("</tbody></table></div>")
+
+            links = []
+            if page:
+                links.append(f'<a href="/console/entities?show={show}&page={page - 1}">'
+                             "&larr; previous</a>")
+            if (page + 1) * PAGE_SIZE < total:
+                links.append(f'<a href="/console/entities?show={show}&page={page + 1}">'
+                             "next &rarr;</a>")
+            if links:
+                body.append(f'<p>{" &nbsp; ".join(links)}</p>')
+
+    return _page("Entities", principal, "".join(body), active="entities")
+
+
+def _browse_cell(column: str, value: Any) -> str:
+    """Render one browser cell, typed by what the column is.
+
+    Amounts arrive from the database as Decimal and stringify as
+    ``80000.0000``, which is four digits of false precision on a figure a
+    business reader is scanning down a column. They are shown grouped and to
+    two places, right-aligned so the magnitudes line up.
+    """
+    if value is None:
+        return '<td class="masked">—</td>'
+
+    if column == "person_id":
+        return (f'<td><a class="id" href="/console/person/{_esc(value)}">'
+                f"{_esc(value)}</a></td>")
+    if column.endswith("_id"):
+        return f'<td><span class="id">{_esc(value)}</span></td>'
+    if column.endswith("_amount") or column.endswith("_percent"):
+        try:
+            return f'<td class="num">{float(value):,.2f}</td>'
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            pass
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f'<td class="num">{value:,}</td>'
+    return f"<td>{_esc(value)}</td>"
+
+
+def _metric(value: Any, label: str) -> str:
+    shown = f"{value:,}" if isinstance(value, int) else _esc(value)
+    return (f'<div class="metric"><span class="v">{shown}</span>'
+            f'<span class="k">{_esc(label)}</span></div>')
+
+
+def _breakdown(title: str, rows: list[dict[str, Any]], key: str) -> str:
+    """A small counted breakdown, or nothing when there is nothing to show."""
+    if not rows:
+        return ""
+    cells = " ".join(
+        f'<span class="chip">{_esc(r[key])} {int(r["n"]):,}</span>' for r in rows
+    )
+    return f'<p class="note">{_esc(title)}: {cells}</p>'
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+
+
+@router.get("/export", response_class=HTMLResponse)
+def export_page(
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+) -> HTMLResponse:
+    """What can be exported, and what each file is for."""
+    _guard(principal, Action.EXPORT, conn)
+
+    from cmdm.export import entity_names, entity_overview, source_shaped_columns
+
+    totals = entity_overview(conn)
+    mappings = _available_mappings()
+
+    body = [
+        "<h2>Hand the source system its extract back</h2>",
+        '<p class="note">One row per row delivered, the columns the mapping '
+        "reads, in the grain the file arrived in — plus the MDM ids. This is "
+        "the file a source system can actually load: it joins to what it "
+        "already has, because it <em>is</em> what it already has.</p>",
+    ]
+
+    if not mappings:
+        body.append('<p class="note">No mappings installed.</p>')
+    for name in mappings:
+        try:
+            from cmdm.ingest.mapping import load_mapping
+            from cmdm.worker import MAPPINGS_DIR
+
+            mapping = load_mapping(MAPPINGS_DIR / f"{name}.toml")
+            id_columns = ", ".join(source_shaped_columns(mapping))
+        except Exception:  # pragma: no cover - a broken mapping file
+            id_columns = "?"
+        body.append(
+            f"<h2>{_esc(name)}</h2>"
+            f'<p class="note">Appends <code>{_esc(id_columns)}</code> to every '
+            f'row. {int(totals.get("landed_rows") or 0):,} rows landed.</p>'
+            f'<p><a href="/console/export/source/{_esc(name)}.csv">'
+            "Download as delivered</a> &nbsp;·&nbsp; "
+            f'<a href="/console/export/source/{_esc(name)}.csv?values=golden">'
+            "Download with golden values</a></p>"
+            '<p class="note"><strong>As delivered</strong> keeps every value '
+            "exactly as it arrived, so the file is recognisable as the one that "
+            "was sent. <strong>Golden values</strong> replaces the party "
+            "attributes with the ones that survived resolution, for a system "
+            "adopting the cleaned data rather than only the keys.</p>"
+        )
+
+    body.append("<h2>Entities</h2>")
+    body.append('<p class="note">The golden records themselves, one file per '
+                "entity, every column the registry declares.</p><p>")
+    labels = {"person": "persons", "policy": "policies",
+              "relationship": "relationships"}
+    body.append(" &nbsp;·&nbsp; ".join(
+        f'<a href="/console/export/entity/{name}.csv">{name.title()}</a> '
+        f'<span class="masked">({int(totals.get(labels[name]) or 0):,} rows)</span>'
+        for name in entity_names()
+    ))
+    body.append("</p>")
+
+    if not principal.may_unmask:
+        body.append('<p class="note">Personal fields will be masked in these '
+                    "files for your role.</p>")
+
+    return _page("Export", principal, "".join(body), active="export")
+
+
+@router.get("/export/entity/{entity}.csv")
+def export_entity_csv(
+    entity: str,
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+) -> StreamingResponse:
+    """Stream one entity's golden records."""
+    _guard(principal, Action.EXPORT, conn)
+
+    from cmdm.export import ENTITY_SPECS, export_entity
+
+    if entity not in ENTITY_SPECS:
+        raise HTTPException(status_code=404, detail=f"unknown entity {entity!r}")
+
+    log_access(conn, principal, Action.EXPORT, entity_name=ENTITY_SPECS[entity].name,
+               pii_revealed=principal.may_unmask, detail={"format": "csv"})
+
+    return StreamingResponse(
+        export_entity(conn, entity, principal=principal),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{entity}.csv"'},
+    )
+
+
+@router.get("/export/source/{mapping_name}.csv")
+def export_source_csv(
+    mapping_name: str,
+    conn: ConnectionDep,
+    principal: PrincipalDep,
+    values: Annotated[str, Query(pattern="^(as-delivered|golden)$")] = "as-delivered",
+) -> StreamingResponse:
+    """Stream the delivered extract back with MDM ids attached."""
+    _guard(principal, Action.EXPORT, conn)
+
+    from cmdm.export import clear_golden_cache, export_source_shaped
+    from cmdm.ingest.mapping import load_mapping
+    from cmdm.worker import MAPPINGS_DIR
+
+    path = (MAPPINGS_DIR / f"{mapping_name}.toml").resolve()
+    if path.parent != MAPPINGS_DIR or not path.exists():
+        raise HTTPException(status_code=404, detail=f"unknown mapping {mapping_name!r}")
+
+    mapping = load_mapping(path)
+    log_access(conn, principal, Action.EXPORT, entity_name="SourceExtract",
+               pii_revealed=principal.may_unmask,
+               detail={"mapping": mapping_name, "values": values})
+
+    def stream():
+        try:
+            yield from export_source_shaped(
+                conn, mapping, principal=principal, values=values
+            )
+        finally:
+            clear_golden_cache()
+
+    suffix = "" if values == "as-delivered" else "-golden"
+    return StreamingResponse(
+        stream(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{mapping_name}-with-mdm-ids{suffix}.csv"'
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Ingestion console

@@ -165,11 +165,16 @@ def check_pipeline() -> str:
         conn.commit()
 
         pairs = conn.execute("SELECT count(*) FROM mdm.match_pair").fetchone()[0]
+        edges = conn.execute(
+            "SELECT count(*) FROM mdm.relationship WHERE is_current"
+        ).fetchone()[0]
 
     assert result.policies == 5000, f"expected 5,000 policies, got {result.policies}"
     assert result.golden_persons > 2000, f"only {result.golden_persons} golden persons"
     assert pairs > 0, "no match decisions were recorded"
-    return f"{result.policies:,} policies -> {result.golden_persons:,} golden persons"
+    assert edges == 15000, f"expected 15,000 role edges, got {edges}"
+    return (f"{result.policies:,} policies -> {result.golden_persons:,} golden "
+            f"persons, {edges:,} role edges")
 
 
 @step("re-processing the same batch changes nothing")
@@ -185,10 +190,14 @@ def check_idempotent() -> str:
         again = process_batch(conn, batch_id)
         conn.commit()
 
-    writes = again.writes["person"]
-    assert writes["inserted"] == 0, f"{writes['inserted']} persons inserted on a re-run"
-    assert writes["changed"] == 0, f"{writes['changed']} persons changed on a re-run"
-    return f"{writes['unchanged']:,} unchanged, 0 changed"
+    for entity, writes in again.writes.items():
+        assert writes["inserted"] == 0, \
+            f"{writes['inserted']} {entity} rows inserted on a re-run"
+        assert writes["changed"] == 0, \
+            f"{writes['changed']} {entity} rows changed on a re-run"
+
+    unchanged = sum(w["unchanged"] for w in again.writes.values())
+    return f"{unchanged:,} rows unchanged across all three entities, 0 changed"
 
 
 @step("the API answers")
@@ -240,12 +249,24 @@ def check_consoles() -> str:
         )
         assert signed_in.status_code == 303, "sign-in failed"
 
-        for path in ("/console", "/console/ingest", "/console/steward",
-                     "/console/rules", "/console/quality"):
+        pages = ("/console", "/console/entities", "/console/export",
+                 "/console/ingest", "/console/steward", "/console/rules",
+                 "/console/quality")
+        for path in pages:
             page = client.get(path)
             assert page.status_code == 200, f"{path} returned {page.status_code}"
+
+        # The export is the deliverable, not the page describing it.
+        handback = client.get("/console/export/source/life_admin.csv")
+        assert handback.status_code == 200, handback.text[:200]
+        lines = handback.text.splitlines()
+        assert len(lines) == 5001, f"expected 5,000 rows back, got {len(lines) - 1}"
+        header = lines[0].split(",")
+        for column in ("PolicyMdmId", "OwnerMdmId", "InsuredMdmId", "AgentMdmId"):
+            assert column in header, f"{column} missing from the hand-back file"
     engine.close_pool()
-    return "5 console pages, sign-in and the anonymous redirect"
+    return f"{len(pages)} console pages, the hand-back export, sign-in and the "\
+           "anonymous redirect"
 
 
 @step("the test suite passes")

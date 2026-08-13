@@ -201,6 +201,51 @@ An id retired by a merge still resolves; the page says which record it followed
 to. Ids are published to downstream systems and cannot be invalidated by an
 internal merge.
 
+**`/console/entities`** — what is actually in the three canonical entities.
+Counts first (policies, golden persons, relationships, landed rows), then the
+breakdowns that say what kind of book this is: roles on the edge, policy status,
+party type. Below that a browser over any of the three, fifty rows a page.
+
+The three entities are not three views of the same thing. **Policy** is the
+grain the data arrives in. **Person** is what resolution collapses it to — 5,000
+policies in the sample carry 3,881 distinct source identities, which resolve to
+2,712 people. **Relationship** is the role-bearing edge: 15,000 of them, one per
+party per policy, and the reason `role` is an attribute of an edge rather than
+three columns on Policy.
+
+The browser masks personal fields for a role without `UNMASK`, exactly as search
+and export do. A page that showed what the other two withhold would be the way
+around masking rather than a view of it.
+
+**`/console/export`** — two different files, for two different questions.
+
+*The hand-back file* (`/console/export/source/{mapping}.csv`) is the one that
+matters to a source system. One row per row delivered, the columns the mapping
+reads, in the grain the file arrived in — plus `PolicyMdmId`, `OwnerMdmId`,
+`InsuredMdmId` and `AgentMdmId`. It joins to what the source already holds
+because it *is* what the source already holds, with four columns added. A dump
+of golden records would be correct and unusable: the source has no key to join
+it on.
+
+Two value modes. **As delivered** keeps every value exactly as it arrived, so
+the file is recognisable as the one that was sent and the ids can be loaded
+without adopting anything else. **Golden values** replaces the party attributes
+with the ones that survived resolution, for a system taking the cleaned data
+too.
+
+A row that has landed but not yet resolved is exported with empty id columns
+rather than dropped. A hand-back file that silently loses rows cannot be
+reconciled against what was sent, which is the first thing anyone loading it
+will try to do.
+
+*The entity files* (`/console/export/entity/{entity}.csv`) are the golden
+records themselves — one file per entity, every column the registry declares.
+For analysis, not for handing back.
+
+Both stream over a server-side cursor, so a book of any size exports in constant
+memory, and both are masked to the caller's role and written to the access log
+with the row count and whether PII was revealed.
+
 **`/console/quality`** — completeness and conformity per attribute, plus how
 many records are held under two or more source keys. Deliberately *not* the
 operational dashboard: queue depth and dead letters belong to whoever runs the
@@ -231,6 +276,10 @@ open http://localhost:8000/console/ingest       # "Process queued batches now"
 
 # 6. the business sees the result
 open http://localhost:8000/console              # sign in as `business`
+open http://localhost:8000/console/entities     # what is in all three entities
+
+# 7. the source system gets its extract back, with MDM ids attached
+open http://localhost:8000/console/export
 ```
 
 ---
