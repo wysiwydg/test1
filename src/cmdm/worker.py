@@ -419,6 +419,68 @@ def _landed_frame(
 # ---------------------------------------------------------------------------
 
 
+def _backfill(connect_pool) -> int:
+    """Re-run every landed batch through the current pipeline.
+
+    What an upgrade needs. A batch is processed once, by whatever version of the
+    pipeline was installed that day; a version that computes something the old
+    one did not — a new entity, a crosswalk that was declared and never
+    written — leaves the store correct for what it holds and silent about what
+    it never derived. Re-uploading the files would work and is the wrong answer:
+    the bytes are already in the landing zone, which is the reason the landing
+    zone is immutable and kept.
+
+    Safe to run at any time, and safe to run twice. The pipeline is idempotent
+    against its own output: an unchanged record is an unchanged record, not a
+    new SCD-2 version. Each batch is its own transaction, so a failure part-way
+    leaves the batches already done committed and reports which one broke.
+    """
+    # Selected by having landed rows rather than by batch state: the states are
+    # an enum that grows between releases, and "there are bytes in the landing
+    # zone to re-run" is the actual condition. A rejected batch never landed
+    # any, so it is excluded by the same join that finds the others.
+    with connect_pool() as conn:
+        batches = [
+            row[0] for row in conn.execute(
+                "SELECT b.batch_id FROM mdm.ingest_batch b "
+                "WHERE EXISTS (SELECT 1 FROM mdm.source_record s "
+                "              WHERE s.source_batch_id = b.batch_id::text) "
+                "ORDER BY b.submitted_at"
+            ).fetchall()
+        ]
+
+    if not batches:
+        log.info("nothing to backfill: no processed batches in the landing zone")
+        return 0
+
+    log.info("backfilling %d batch(es)", len(batches))
+    # New rows and new versions are counted apart from rows that were already
+    # right. On an upgrade the first is the point and the second is most of the
+    # book; adding them together would report a number that looks like a
+    # rewrite of the whole store on a run that changed nothing but the gaps.
+    added = versioned = untouched = 0
+    for index, batch_id in enumerate(batches, start=1):
+        with connect_pool() as conn:
+            result = process_batch(conn, batch_id)
+            conn.commit()
+
+        new = sum(w["inserted"] for w in result.writes.values())
+        revised = sum(w["versioned"] for w in result.writes.values())
+        same = sum(w["unchanged"] for w in result.writes.values())
+        added, versioned, untouched = added + new, versioned + revised, untouched + same
+        log.info(
+            "  %d/%d %s: %s new, %s revised, %s unchanged, %s policy keys linked",
+            index, len(batches), batch_id,
+            f"{new:,}", f"{revised:,}", f"{same:,}", f"{result.policy_xref_rows:,}",
+        )
+
+    log.info(
+        "backfill complete: %s new, %s revised, %s already correct",
+        f"{added:,}", f"{versioned:,}", f"{untouched:,}",
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """``python -m cmdm.worker`` — the process the architecture calls a worker."""
     parser = argparse.ArgumentParser(
@@ -426,7 +488,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Drain the ingest queue, or mine standardization rules.",
     )
     parser.add_argument(
-        "command", choices=("serve", "once", "mine"), nargs="?", default="serve"
+        "command", choices=("serve", "once", "mine", "backfill"),
+        nargs="?", default="serve",
     )
     parser.add_argument("--queue", default=QUEUE_STANDARDIZE)
     parser.add_argument(
@@ -469,6 +532,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcomes = drain(connect_pool, queue_name=args.queue, limit=args.max_jobs or 1)
         log.info("handled %d job(s)", len(outcomes))
         return 0 if all(o["ok"] for o in outcomes) else 1
+
+    if args.command == "backfill":
+        return _backfill(connect_pool)
 
     log.info("worker started on queue %r", args.queue)
     try:

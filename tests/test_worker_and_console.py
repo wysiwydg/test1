@@ -143,6 +143,65 @@ def test_reprocessing_a_batch_changes_nothing(store, landed, processed):
     assert second.writes["policy"]["changed"] == 0
 
 
+def test_backfill_reruns_every_landed_batch(migrated, store, landed):
+    """The upgrade path. A release that computes something the last one did not
+    has to be able to fill in the gap from the landing zone, without anybody
+    re-uploading a file they already sent."""
+    import psycopg
+
+    from cmdm.worker import _backfill
+
+    store.commit()
+
+    def connect_pool():
+        return psycopg.connect(migrated)
+
+    assert _backfill(connect_pool) == 0
+
+    with psycopg.connect(migrated) as check:
+        persons = check.execute(
+            "SELECT count(*) FROM mdm.person WHERE is_current"
+        ).fetchone()[0]
+        edges = check.execute(
+            "SELECT count(*) FROM mdm.relationship WHERE is_current"
+        ).fetchone()[0]
+        keys = check.execute("SELECT count(*) FROM mdm.policy_xref").fetchone()[0]
+    assert persons and edges and keys, "backfill produced nothing from a landed batch"
+
+
+def test_backfill_twice_writes_nothing_the_second_time(migrated, store, processed):
+    """It is offered as the thing to run after an update, so it will be run
+    twice by somebody who is not sure whether the first one worked."""
+    import psycopg
+
+    from cmdm.worker import _backfill
+
+    store.commit()
+
+    def connect_pool():
+        return psycopg.connect(migrated)
+
+    _backfill(connect_pool)
+    with psycopg.connect(migrated) as check:
+        before = check.execute("SELECT count(*) FROM mdm.person").fetchone()[0]
+
+    _backfill(connect_pool)
+    with psycopg.connect(migrated) as check:
+        after = check.execute("SELECT count(*) FROM mdm.person").fetchone()[0]
+
+    assert after == before, "a second backfill manufactured new versions"
+
+
+def test_backfill_on_an_empty_landing_zone_is_not_an_error(migrated):
+    """Running it on a fresh install should say so, not fail."""
+    import psycopg
+
+    from cmdm.worker import _backfill
+
+    _clear(migrated)
+    assert _backfill(lambda: psycopg.connect(migrated)) == 0
+
+
 def test_the_landed_frame_carries_the_record_id(store, landed, mapping):
     """Survivorship needs it to name a winner and to break ties the same way
     twice."""

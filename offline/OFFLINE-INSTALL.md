@@ -127,6 +127,8 @@ not recovered.
 | <http://127.0.0.1:8000/console/login> | paste a key to sign in |
 | `/console/ingest` | submit a CSV, watch it land, process the queue |
 | `/console` | search customers, golden record, lineage |
+| `/console/entities` | what is in Person, Policy and Relationship, and a browser |
+| `/console/export` | your extract back with MDM ids, or the golden records |
 | `/console/steward` | the grey-zone review queue |
 | `/console/quality` | completeness and conformity |
 
@@ -154,6 +156,43 @@ start.cmd
 
 The full walkthrough of each console is in
 [`docs/04-operating-the-consoles.md`](docs/04-operating-the-consoles.md).
+
+---
+
+## Updating to a newer release
+
+You do not need this zip again. Nothing in it changes between releases except
+this project's own wheel — the PostgreSQL binaries, polars, scipy and the rest
+are byte-for-byte the same files. A release ships instead as an **update pack**
+of well under a megabyte, built with `python -m scripts.build_update_pack`.
+
+Unzip it anywhere and point it at this folder:
+
+```
+update.cmd  C:\path\to\cmdm-offline
+```
+
+It reinstalls the wheel from disk with `--no-index` — no network, on either
+end — replaces `src\`, `tests\`, `docs\` and `verify.py`, and keeps what it
+replaced in `backup-<timestamp>\`. It will not touch `pgdata\`, `pgpassword`
+or `config.cmd`: your database, your keys and your identifier-hashing secret
+are the irreplaceable part of an installation and no update has business
+there. It refuses outright if the release needs a package this bundle does not
+already carry, because an update pack cannot add compiled dependencies.
+
+Then:
+
+```
+verify.cmd --quick        prove the machine still runs it
+worker.cmd backfill       bring the existing golden store forward
+```
+
+`backfill` re-runs every batch already in the landing zone through the current
+pipeline. That is how a release that computes something the last one did not
+fills in the gap without you re-uploading a file — the bytes are already in the
+landing zone, which is why the landing zone is immutable and kept. It is
+idempotent: rows that are already right stay on the version they are on, and
+running it twice does nothing the second time.
 
 ---
 

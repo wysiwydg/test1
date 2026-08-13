@@ -93,3 +93,37 @@ def test_distribution_names_normalise() -> None:
     """prometheus_client and prometheus-client are the same requirement."""
     assert _canonical("prometheus_client") == _canonical("prometheus-client")
     assert _canonical("typing_extensions") == "typing-extensions"
+
+
+# ---------------------------------------------------------------------------
+# Update pack
+# ---------------------------------------------------------------------------
+
+
+def test_the_update_pack_declares_only_what_a_bundle_installs() -> None:
+    """The pack is refused on the target if it needs a package the bundle does
+    not carry. Declaring the dev extras there would make every update refuse
+    itself over ruff and mypy, which no bundle has ever contained."""
+    from scripts.build_update_pack import _declared_dependencies
+
+    declared = _declared_dependencies()
+    assert {"polars", "psycopg", "fastapi", "pytest"} <= declared
+    assert not declared & {"ruff", "mypy", "onnxruntime", "pgserver"}
+
+
+def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:
+    """pgdata is the golden store and config holds the hashing key. An update
+    that overwrote either would destroy the installation it was fixing."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "cmdm_update", pathlib.Path(__file__).resolve().parent.parent
+        / "offline" / "update.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    replaced = set(module.DIRECTORIES) | set(module.FILES)
+    assert not replaced & set(module.PRESERVED)
+    for name in ("pgdata", "config.cmd", "config.sh", ".venv", "wheels", "pgsql"):
+        assert name in module.PRESERVED
