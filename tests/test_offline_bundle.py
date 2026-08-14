@@ -128,6 +128,22 @@ def test_an_optional_runtime_does_not_refuse_an_older_bundle() -> None:
     assert "onnxruntime" not in _declared_dependencies()
 
 
+def test_the_pack_never_ships_the_reflex_build_tree_or_session_state() -> None:
+    """Two things live under rxapp/ that belong to a build host and nowhere
+    else. `.web` is 200 MB of node_modules, in a pack whose entire reason for
+    existing is that it is small. `.states` is Reflex's pickled live sessions --
+    including, after any local sign-in, the API key that was pasted in, which
+    would put one machine's credentials in every copy of the bundle."""
+    import inspect
+
+    from scripts import build_offline_bundle, build_update_pack
+
+    for module in (build_offline_bundle, build_update_pack):
+        source = inspect.getsource(module.build)
+        assert '".web"' in source, f"{module.__name__} would ship node_modules"
+        assert '".states"' in source, f"{module.__name__} would ship session state"
+
+
 def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:
     """pgdata is the golden store and config holds the hashing key. An update
     that overwrote either would destroy the installation it was fixing."""

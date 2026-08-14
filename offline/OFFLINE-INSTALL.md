@@ -15,7 +15,7 @@ database** and **no Python packages installed**. The only prerequisite is
 | `src/`, `tests/`, `scripts/` | The system and its 516 tests |
 | `data/life_admin_sample.csv` | A 5,000-policy synthetic extract, so there is something to load |
 | `docs/` | Architecture, data model, and the console operator guide |
-| `install.cmd` `verify.cmd` `start.cmd` `worker.cmd` `stop.cmd` `status.cmd` | What you run |
+| `install.cmd` `verify.cmd` `start.cmd` `rxconsole.cmd` `worker.cmd` `stop.cmd` `status.cmd` | What you run |
 
 Nothing here reaches the network. The installer runs `pip --no-index`, which
 makes that a guarantee rather than a promise: pip is forbidden from consulting
@@ -131,6 +131,35 @@ not recovered.
 | `/console/export` | your extract back with MDM ids, or the golden records |
 | `/console/steward` | the grey-zone review queue |
 | `/console/quality` | completeness and conformity |
+
+### The Reflex console
+
+A second UI, on a different port, showing the same store:
+
+```
+rxconsole.cmd             http://127.0.0.1:8100
+```
+
+It adds a **single customer view** the server-rendered console does not have:
+one party with every policy they own, every policy whose benefit is payable on
+them, their agent book if they have one, and — on each policy — *the other
+parties on that contract and in what role*. Plus household, affiliations, the
+crosswalk, survivorship lineage, version history, and what the matcher compared
+this party against including the pairs it refused.
+
+The layout reflows: panels fill a wide monitor in as many columns as fit and
+stack to one on a laptop or a phone, and the navigation collapses to a strip
+rather than hiding behind a menu.
+
+**No Node, no npm, no network.** Reflex compiles a React frontend, and that
+compile happened on the machine that built this bundle. What is here is the
+output — about 1.8 MB of static files — served by a Python backend. Nothing
+fetches anything.
+
+`start.cmd` and `rxconsole.cmd` run side by side against the same database. The
+server-rendered console at `/console` still carries ingestion, stewardship,
+rules, quality and export; the Reflex console currently carries search and the
+customer view.
 
 In another Command Prompt, to process submitted batches continuously:
 
