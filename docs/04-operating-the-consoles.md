@@ -236,7 +236,7 @@ householding pass adds on top.
 The **Household** section counts what the sources say about who lives with whom:
 households, how many parties are in one, the largest, and how many parties are
 linked to a company, trust or estate. Measured on the 5,000-policy sample
-against the generator's own ground truth: 598 households derived, every one of
+against the generator's own ground truth: 597 households derived, every one of
 them a single real family, no flatmate wrongly included, and 80% of the real
 families of two or more found intact. The 20% not found are families whose
 members never appear together on a policy with a stated relationship — no

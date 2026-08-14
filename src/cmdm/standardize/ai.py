@@ -385,18 +385,46 @@ class OnnxStandardizer:
         )
 
 
-def get_standardizer(model_path: str | Path | None = None) -> Standardizer:
-    """Return the configured standardizer.
+def get_standardizer(
+    model_path: str | Path | None = None, *, conn: Any = None
+) -> Standardizer:
+    """Return the standardizer this store has approved, or the reference one.
 
-    Falls back to the heuristic implementation when no model is configured. The
-    fallback is announced by the returned object's ``name``, which is written to
-    every exception row — so "which engine standardized this record" is always
-    answerable from the data rather than from deployment configuration nobody
-    recorded.
+    Resolution order, and the order matters:
+
+    1.  An explicit ``model_path``. A caller naming a file means it.
+    2.  The **registry**, when a connection is supplied — the model a human
+        promoted, with measured evidence behind it.
+    3.  ``CMDM_STANDARDIZER_MODEL``. Kept for the case where there is no
+        database yet, and deliberately *below* the registry: an environment
+        variable is a deployment detail nobody reviewed, and it should not
+        quietly outrank a model somebody signed for.
+    4.  The heuristic reference implementation.
+
+    A registered model whose artifact no longer hashes to what was evaluated is
+    refused rather than loaded. The file changed after somebody approved it, so
+    what would run is not what was approved.
     """
     import os
 
-    path = model_path or os.environ.get("CMDM_STANDARDIZER_MODEL")
+    if model_path:
+        return OnnxStandardizer(model_path)
+
+    if conn is not None:
+        from cmdm.models import ModelKind, active_model
+
+        approved = active_model(conn, ModelKind.STANDARDIZER)
+        if approved and approved.artifact_path:
+            if not approved.runnable:
+                raise RuntimeError(
+                    f"{approved.model_name} {approved.version} is the approved "
+                    "standardizer but its artifact is missing or has changed "
+                    "since it was evaluated; refusing to run a model nobody "
+                    "approved in this state"
+                )
+            return OnnxStandardizer(approved.artifact_path)
+
+    path = os.environ.get("CMDM_STANDARDIZER_MODEL")
     if not path:
         return HeuristicStandardizer()
     return OnnxStandardizer(path)

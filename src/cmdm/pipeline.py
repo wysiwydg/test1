@@ -465,6 +465,7 @@ def run_pipeline(
         persons,
         id_column=SOURCE_IDENTITY_COLUMN,
         conn=None,
+        registry_conn=conn,
         decisions=load_steward_decisions(conn),
     )
     result.resolution = res_report

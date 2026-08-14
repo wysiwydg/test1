@@ -25,8 +25,8 @@ customer, and what should that customer's details actually say?**
 | | |
 |---|---|
 | Policies in | 5,000 |
-| Real customers out | 2,386 |
-| Households found | 598 |
+| Real customers out | 2,389 |
+| Households found | 597 |
 | Time to do all of it | about 5 seconds |
 
 ---
@@ -112,8 +112,8 @@ written in a policy document.
   model's name and version. Months later you can ask "why are these two the
   same person" and get an answer.
 
-**Kept on the record.** On the reference file the system stores 11,787 match
-decisions — including the 11,663 it decided *against*. Keeping the rejections
+**Kept on the record.** On the reference file the system stores 11,931 match
+decisions — including the 11,834 it decided *against*. Keeping the rejections
 is deliberate: "why were these two not merged?" gets asked as often as the
 opposite, and it is unanswerable later if you only kept the merges.
 
@@ -157,7 +157,7 @@ another person's life: spouse, parent, child, employer. That is a fact the
 source stated. So households are built from those statements, not guessed from
 who shares a postcode.
 
-**What that buys.** Of 598 households found, every one is a single real family
+**What that buys.** Of 597 households found, every one is a single real family
 — no accidental merging of two families, and no flatmates swept in just because
 they share an address. Spouses who kept their own surname are still found,
 because the source said "spouse".

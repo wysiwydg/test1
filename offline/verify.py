@@ -191,7 +191,7 @@ def check_migrations() -> str:
         tables = conn.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'mdm'"
         ).fetchone()[0]
-    assert tables == 21, f"expected 21 tables in the mdm schema, found {tables}"
+    assert tables == 22, f"expected 22 tables in the mdm schema, found {tables}"
     return f"{len(applied)} migration(s) applied this run, {tables} tables"
 
 

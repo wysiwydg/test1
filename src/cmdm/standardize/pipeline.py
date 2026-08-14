@@ -33,7 +33,6 @@ from psycopg.types.json import Jsonb
 
 from cmdm.model.ids import uuid7
 from cmdm.standardize.ai import (
-    HeuristicStandardizer,
     StandardizationRequest,
     Standardizer,
 )
@@ -217,7 +216,13 @@ def standardize(
 
     # -- (c) AI fallback, on gate failures only
     failures = gated.filter(~pl.col(GATE_PASSED_COLUMN))
-    standardizer = standardizer or HeuristicStandardizer()
+    # No engine handed in means "use whatever this store has approved". The
+    # registry is consulted rather than defaulting straight to the reference
+    # implementation, so promoting a model actually changes what runs.
+    if standardizer is None:
+        from cmdm.standardize.ai import get_standardizer
+
+        standardizer = get_standardizer(conn=conn)
     report.model_name = standardizer.name
 
     if failures.height:

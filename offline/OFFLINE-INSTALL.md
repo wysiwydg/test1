@@ -10,9 +10,9 @@ database** and **no Python packages installed**. The only prerequisite is
 
 | | |
 |---|---|
-| `wheels/` | 33 pre-compiled Python packages, all `win_amd64` / cp313 |
+| `wheels/` | 38 pre-compiled Python packages, all `win_amd64` / cp313 |
 | `pgsql/` | **PostgreSQL 16.2 for Windows** — the real server, 41 MB of binaries and DLLs |
-| `src/`, `tests/`, `scripts/` | The system and its 433 tests |
+| `src/`, `tests/`, `scripts/` | The system and its 516 tests |
 | `data/life_admin_sample.csv` | A 5,000-policy synthetic extract, so there is something to load |
 | `docs/` | Architecture, data model, and the console operator guide |
 | `install.cmd` `verify.cmd` `start.cmd` `worker.cmd` `stop.cmd` `status.cmd` | What you run |
@@ -54,11 +54,11 @@ pages, and finally runs the whole test suite. Expect roughly this:
    1. PASS  no network is needed (and none is used)
    2. PASS  every runtime import resolves           (polars 1.43.2)
    3. PASS  the embedded PostgreSQL starts          (PostgreSQL 16.2)
-   4. PASS  the schema applies                      (6 migrations, 21 tables)
+   4. PASS  the schema applies                      (8 migrations, 22 tables)
    5. PASS  a batch ingests through the real pipeline
-                                (5,000 policies -> 2,712 golden persons)
+                                (5,000 policies -> 2,389 golden persons)
    6. PASS  re-processing the same batch changes nothing
-                                (2,712 unchanged, 0 changed)
+                                (22,389 unchanged, 0 changed)
    7. PASS  the API answers
    8. PASS  the consoles render
    9. PASS  the test suite passes                   (all tests green)
@@ -72,7 +72,7 @@ Linux box the whole run is about 30 seconds; **on Windows expect two to five
 times that**, and longer again if antivirus is inspecting the PostgreSQL
 binaries and the sample extract as they are read.
 
-Step 9 — the 441-test suite — is the slow one by a wide margin. Every test that
+Step 9 — the 516-test suite — is the slow one by a wide margin. Every test that
 touches the database opens a connection, and on Windows that is a TCP
 connection rather than a Unix socket, so this step alone can run for several
 minutes. Steps 1 to 8 have already exercised the whole system end to end, so if
@@ -150,9 +150,52 @@ The worker's other subcommands:
 | `worker.cmd check` | does the crosswalk still match the installed mappings? |
 | `worker.cmd backfill` | re-run every landed batch through the current pipeline |
 | `worker.cmd rebuild` | discard the derived store and recompute it from the landing zone |
+| `worker.cmd evaluate` | measure matching against a benchmark whose answer key is known |
+| `worker.cmd models` | list registered models; promote one |
 
-`check` and `backfill` change nothing you cannot repeat. `rebuild` is the one
-that deletes, and it is described under **Updating** below.
+`check`, `backfill` and `evaluate` change nothing you cannot repeat. `rebuild`
+is the one that deletes, and it is described under **Updating** below.
+
+### Measuring whether matching is any good
+
+Every other number the consoles show — parties resolved, duplicates found — goes
+*up* when matching gets too eager, right up until somebody's policy is attached
+to a stranger. `evaluate` is the one command that can tell the difference,
+because it runs against an extract where the right answer is already known:
+
+```
+worker.cmd evaluate --rows 2000 --duplicate-rate 0.18
+```
+
+It generates a benchmark in which a share of parties arrive under two customer
+numbers — the second registration missing a date of birth, or carrying a
+different email, the way a real re-registration does — lands it, processes it,
+and compares what was merged against what should have been. It reports blocking
+recall, precision, recall, F1, how many merges the model contributed, and the
+worst wrongly-merged cluster, with examples named.
+
+**Run it against a scratch store, not your production one.** It lands rows.
+
+### Promoting a model
+
+With nothing registered, both AI paths run their reference implementations —
+that is the default and it is fully functional. `models` shows what is
+registered and what is running:
+
+```
+worker.cmd models
+```
+
+A model reaches ACTIVE only with measured evidence and a named approver, and
+the database refuses to hold one that has neither:
+
+```
+worker.cmd models --promote <model-id> --by "A. Steward" --note "why"
+```
+
+Promotion is refused if the model has never been evaluated, if the approver or
+the reason is blank, or if the artifact on disk no longer hashes to what was
+registered — a changed file is not the model that was approved.
 
 To stop the database when you are finished:
 
@@ -353,7 +396,7 @@ a Linux wheel set: the installer, the verifier, the embedded PostgreSQL
 lifecycle (initdb, start, connect, restart, stop), migrations, the
 5,000-policy pipeline, idempotent re-processing, the
 API, all console pages, the launcher chain (`start.sh` → live server → sign-in →
-`worker.sh`), and all 433 tests.
+`worker.sh`), and all 516 tests.
 
 **Verified by execution under Python 3.13**: the same bundle built for
 Linux/cp313, installed and run with `/usr/bin/python3.13` — all nine checks

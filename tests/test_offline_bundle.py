@@ -100,7 +100,7 @@ def test_distribution_names_normalise() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_update_pack_declares_only_what_a_bundle_installs() -> None:
+def test_the_update_pack_declares_only_what_a_bundle_needs_to_run() -> None:
     """The pack is refused on the target if it needs a package the bundle does
     not carry. Declaring the dev extras there would make every update refuse
     itself over ruff and mypy, which no bundle has ever contained."""
@@ -108,7 +108,24 @@ def test_the_update_pack_declares_only_what_a_bundle_installs() -> None:
 
     declared = _declared_dependencies()
     assert {"polars", "psycopg", "fastapi", "pytest"} <= declared
-    assert not declared & {"ruff", "mypy", "onnxruntime", "pgserver"}
+    assert not declared & {"ruff", "mypy", "pgserver"}
+
+
+def test_an_optional_runtime_does_not_refuse_an_older_bundle() -> None:
+    """onnxruntime ships in a bundle now, so a model can be promoted on a
+    machine with no internet. It is still not *required*: nothing imports it
+    until a model is ACTIVE. Every bundle cut before it was added would be
+    refused this release over a package its code never reaches for — and the
+    refusal is meant for the case where the update would genuinely not run."""
+    from scripts.build_offline_bundle import OPTIONAL, OPTIONAL_AT_RUNTIME
+    from scripts.build_update_pack import _declared_dependencies
+
+    assert any(spec.startswith("onnxruntime") for spec in OPTIONAL), (
+        "an update pack cannot install a compiled dependency, so a bundle "
+        "without onnxruntime can never run an ONNX model however it is approved"
+    )
+    assert "onnxruntime" in OPTIONAL_AT_RUNTIME
+    assert "onnxruntime" not in _declared_dependencies()
 
 
 def test_the_updater_will_not_touch_the_irreplaceable_things() -> None:

@@ -30,7 +30,48 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: duplicated from them -- these are the top-level names, and pip resolves the
 #: rest -- plus what the test suite needs, because a bundle you cannot verify on
 #: arrival is a bundle you have to trust.
+#:
+#: `ai` carries onnxruntime, which nothing imports until a model is promoted in
+#: the registry. It is here anyway because an update pack ships Python files and
+#: cannot install a compiled dependency on a machine with no internet: leaving it
+#: out would mean a target that can never run an ONNX model, no matter what is
+#: approved for it later. About 15 MB for an option kept open.
 TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
+
+#: In the bundle, but not required to run it.
+#:
+#: onnxruntime is imported only when a model is ACTIVE in the registry; with
+#: nothing promoted both AI paths run their reference implementations and never
+#: touch it. It is in a bundle anyway because an update pack ships Python files
+#: and cannot install a compiled dependency on a machine with no internet:
+#: leaving it out would mean a target that can never run an ONNX model, whatever
+#: is approved for it later. About 14 MB for an option kept open.
+#:
+#: Downloaded separately from TOP_LEVEL for two reasons. It must not be in the
+#: required-dependency list an update pack checks against the target, or every
+#: bundle cut before this line existed would be refused an update over a package
+#: its code never imports. And it needs a wider set of platform tags than the
+#: rest -- see EXTRA_PLATFORM_TAGS.
+OPTIONAL = ["onnxruntime>=1.18"]
+
+#: Names in OPTIONAL, for the update pack to subtract. Derived rather than
+#: written twice, because two lists that must agree eventually will not.
+OPTIONAL_AT_RUNTIME = {
+    re.split(r"[<>=!~\[ ]", spec)[0].strip().lower() for spec in OPTIONAL
+}
+
+#: Additional wheel tags accepted for OPTIONAL packages only.
+#:
+#: onnxruntime stopped publishing manylinux2014 wheels after 1.16: current
+#: releases are tagged manylinux_2_27, so a bundle asking only for manylinux2014
+#: resolves nothing newer and the build fails outright. Widening the tag set for
+#: every package would instead raise the glibc floor of the whole bundle to
+#: satisfy one optional dependency, which is the wrong trade in the other
+#: direction -- so the widening is confined to the package that needs it.
+EXTRA_PLATFORM_TAGS = {
+    "manylinux2014_x86_64": ["manylinux_2_27_x86_64", "manylinux_2_28_x86_64"],
+    "manylinux2014_aarch64": ["manylinux_2_27_aarch64", "manylinux_2_28_aarch64"],
+}
 
 #: PostgreSQL itself, shipped as plain files rather than as a wheel.
 #:
@@ -82,6 +123,7 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
         *(dep for spec in TOP_LEVEL for dep in _requirements(spec)),
     ])
 
+    _optional_wheels(wheels, platform, python)
     _complete_closure(wheels, platform, python)
     _postgres_binaries(staging, platform, python)
 
@@ -176,6 +218,50 @@ def _missing_for_target(wheels: pathlib.Path, environment: dict[str, str]) -> se
             if _canonical(requirement.name) not in have:
                 missing.add(str(requirement).split(";")[0].strip())
     return missing
+
+
+def _optional_wheels(wheels: pathlib.Path, platform: str, python: str) -> None:
+    """Fetch the packages a bundle carries but does not need to run.
+
+    Separate from the main download so one optional package cannot dictate the
+    wheel tags -- and therefore the minimum glibc -- of everything else in the
+    bundle.
+
+    Resolved into a scratch directory and then filtered, because the widened tag
+    set applies to whatever pip pulls in transitively as well. onnxruntime needs
+    only ``numpy>=1.21.6``, but offered a newer tag it fetches the newest numpy
+    there is; two numpy wheels in one wheelhouse means ``pip install --no-index``
+    silently takes the higher version, which is neither the one the required
+    closure resolved nor one whose glibc floor anybody chose. Only packages the
+    bundle does not already have are kept.
+    """
+    if not OPTIONAL:
+        return
+
+    import tempfile
+
+    abi = f"cp{python.replace('.', '')}"
+    tags = [platform, *EXTRA_PLATFORM_TAGS.get(platform, [])]
+    print(f"downloading optional wheels ({', '.join(OPTIONAL)})")
+
+    with tempfile.TemporaryDirectory() as scratch:
+        staged = pathlib.Path(scratch)
+        run([
+            sys.executable, "-m", "pip", "download", "--dest", str(staged),
+            "--only-binary=:all:",
+            *(argument for tag in tags for argument in ("--platform", tag)),
+            "--python-version", python, "--implementation", "cp", "--abi", abi,
+            *OPTIONAL,
+        ])
+
+        have = _present(wheels)
+        for wheel in sorted(staged.glob("*.whl")):
+            name = _canonical(wheel.name.split("-")[0])
+            if name in have:
+                print(f"  keeping the resolved {name}, not the optional pass's "
+                      f"{wheel.name}")
+                continue
+            shutil.copy2(wheel, wheels / wheel.name)
 
 
 def _complete_closure(wheels: pathlib.Path, platform: str, python: str) -> None:

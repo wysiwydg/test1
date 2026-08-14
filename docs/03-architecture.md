@@ -19,7 +19,7 @@ down.
 | Canonical entities | 3 |
 | Tables in the store | 21 |
 | Records seen by a model | **13.0%** |
-| Candidate pairs seen by a model | **1.05%** |
+| Candidate pairs seen by a model | **0.81%** |
 | Model decisions logged | 100% |
 
 ---
@@ -76,7 +76,7 @@ queued job.
 ```
  land ─> shred ─> standardize ─> resolve ─> survive ─> write ─> household
                        │             │
-                  13.0% of      1.05% of
+                  13.0% of      0.81% of
                    records        pairs
                        ↓             ↓
               local standardizer   grey-zone classifier
@@ -113,14 +113,14 @@ produced no phonetic key cannot be blocked on, and that a party the matcher
 cannot block on is a party the matcher will silently never compare.
 
 ```
-  2,419 party records
+  2,407 party records
         │
       [gate · 12 checks]
-        ├─ passes every check ──────> 2,089   86.4% · no model, ever ─┐
+        ├─ passes every check ──────> 2,077   86.3% · no model, ever ─┐
         ├─ name unparseable ────────>   314   13.0% · to the model ───┤
         └─ date of birth implausible >    21   logged, not invented    │
                                                                       ↓
-                                                    2,398 usable · 99.1%
+                                                    2,385 usable · 99.1%
 ```
 
 The 21 records the model cannot help are not silently dropped. A date of birth
@@ -147,20 +147,20 @@ watches for, and the answer is a deterministic rule rather than a faster model.
 
 Resolution never compares all pairs. Blocking generates candidates from keys
 computed at ingest — sorted name tokens, a phonetic key, an address key — which
-turns 2.9 million possible pairs into 11,787 candidates, a reduction of 248:1.
+turns 2.9 million possible pairs into 11,931 candidates, a reduction of 243:1.
 Each candidate is scored by vectorized comparators and lands in one of three
 zones.
 
 ```
   score  0.00 ─────────────── 0.50 ────── 0.85 ────── 1.00
-         │  11,663 auto-reject  │ 124 grey │  0 auto-match
-         │  no model            │  1.05%   │
+         │  11,834 auto-reject  │  97 grey │  0 auto-match
+         │  no model            │  0.81%   │
                                      ↓
                             cross-encoder, accepts at ≥ 0.70
-                                     ├──> 41 merged
-                                     └──> 83 held apart
+                                     ├──> 18 merged
+                                     └──> 79 held apart
 
-  1,789 pairs vetoed — conflicting DOB, or person vs legal entity.
+  1,796 pairs vetoed — conflicting DOB, or person vs legal entity.
   A veto outranks any score, including the model's.
 ```
 
@@ -231,12 +231,12 @@ the exact token shape it came from.
 The last one is what makes the rest checkable. Every grey-zone verdict lands in
 `match_pair` with its score, its zone and the engine that produced it; every
 fallback invocation lands in `standardization_exception` with the checks it
-failed. On the reference extract that is 11,787 pair decisions and 314
-exceptions retained — including the 11,663 rejections, because "why were these
+failed. On the reference extract that is 11,931 pair decisions and 314
+exceptions retained — including the 11,834 rejections, because "why were these
 two *not* merged" is asked as often as the opposite and is unanswerable after
 the fact if only the merges were kept.
 
-**Reproducibility.** Re-processing the same batch writes nothing: 22,386 rows
+**Reproducibility.** Re-processing the same batch writes nothing: 22,389 rows
 unchanged, zero changed. The golden writer compares a content hash over
 business fields only, so audit columns moving does not manufacture a version.
 Both models write their name and version onto their decisions, so a run can be
@@ -245,7 +245,107 @@ recorded.
 
 ---
 
-## 7. Households: derived without a model, on purpose
+## 7. Which model is allowed to run
+
+Sections 5 and 6 hold a standardization *rule* to a high standard: mined from
+evidence, shadow-tested against past data, approved by a named steward with a
+reason, and refused by the database if any of that is missing. Until now the
+*models* those rules exist to replace were held to none of it. Which model ran
+was an environment variable pointing at a file. Swapping it was a deployment
+action with no measurement, no approval and no trace — the exact shape of change
+this system refuses everywhere else.
+
+A model version now moves through the states a rule moves through:
+
+```
+  CANDIDATE ──evaluate──> SHADOW ──promote──> ACTIVE
+   registered,             measured,          the model
+   fingerprinted           not yet trusted    its kind runs
+                                                   │
+                                                RETIRED
+                                              (kept, never deleted —
+                                               its past decisions
+                                               still name it)
+
+        the database refuses an ACTIVE model with no recorded
+        evaluation and no named approver
+```
+
+Two properties make the record load-bearing rather than decorative.
+
+**Evidence is measured, not asserted.** Promotion requires metrics produced by
+running the candidate over a benchmark whose answer key is known — the harness
+in section 8. A model registered with numbers somebody typed in is a model
+nobody measured, and `promote` refuses it.
+
+**The artifact is fingerprinted.** A file on disk can change after it was
+evaluated, and then the model running is not the model that was approved. The
+SHA-256 recorded at registration is what makes that detectable instead of
+assumed: an ACTIVE model whose artifact no longer matches is refused at load
+time rather than quietly run.
+
+Precedence when selecting an engine is explicit, and the registry outranks the
+environment: an approved model beats `CMDM_STANDARDIZER_MODEL`, because an
+environment variable is a deployment detail nobody reviewed.
+
+| | |
+|---|---|
+| Explicit path passed in code | tests and one-off experiments |
+| **ACTIVE model in the registry** | **what production runs** |
+| `CMDM_*_MODEL` environment variable | legacy escape hatch |
+| Reference implementation | the default, and fully functional |
+
+With nothing promoted, both AI paths run their reference implementations — the
+heuristic standardizer and the feature cross-encoder. That is not a degraded
+mode; it is what every figure in this document was measured on. A model is an
+optimization the system is built to survive the absence of.
+
+---
+
+## 8. Measuring whether matching works
+
+Thresholds are the most consequential numbers here and the easiest to change
+casually. Lowering auto-match merges more parties, which improves every figure
+the consoles show — more resolved, fewer duplicates, a tidier book — right up
+until somebody's policy is attached to a stranger. No other check in this system
+catches that, because "did resolution do the right thing" has no answer without
+knowing what the right thing was.
+
+So the harness builds an extract whose answer key is known: a share of parties
+arrive under two customer numbers, the second registration missing a date of
+birth or carrying a different email, the way a real re-registration does. The
+generator knows which pairs those are; nothing is read back out of the thing
+being measured.
+
+```
+worker evaluate --rows 2000 --duplicate-rate 0.18
+```
+
+| Measure | What a regression in it means |
+|---|---|
+| Blocking recall | a pair blocking never generated is invisible to every stage after it — no comparator, no model and no steward will ever see it. This is the ceiling on recall |
+| Precision | a wrong merge silently destroys two records; an unmerged duplicate is visible and fixable. Held tighter than recall for that reason |
+| Recall | duplicates left in the book |
+| Largest wrong cluster | merging is transitive, so one bad edge joins two clusters entirely — damage a pair metric cannot see, because the bad pair is one row while the cost is proportional to both clusters |
+| Model true vs false positives | whether the grey zone is buying recall or just buying merges |
+
+Measured at 2,000 rows: blocking recall 0.934, precision 0.936, recall 0.721,
+F1 0.815. The floors asserted in the suite sit deliberately below those, because
+a floor set at the current value fails on noise and gets raised until it means
+nothing.
+
+**What it found immediately.** Most false positives share one shape: an agent
+record auto-matching a customer record on name alone at ~0.975. Agent blocks
+carry a name, an email and a phone — no date of birth, no address — so the
+comparators that would disagree have nothing to compare, and a high score over
+three fields is treated exactly like a high score over eight. *The score does
+not account for how much evidence it rests on.* That is a real gap in the
+scoring model, surfaced by measurement rather than by inspection, and it is
+recorded here rather than quietly patched.
+
+---
+
+## 9. Households: derived without a model, on purpose
 
 Householding is the place where a model would be the obvious reach, and it is
 deliberately not used. Insurable interest is a condition of issue, so a life
@@ -254,9 +354,9 @@ spouse, parent or child. That statement is evidence. A shared postcode is not.
 
 Households are therefore the connected components over *stated* family
 relations only, with address used to corroborate and never to admit a member.
-Measured against the reference extract's own ground truth: 598 households
+Measured against the reference extract's own ground truth: 597 households
 derived, every one of them a single real family, no flatmate wrongly included,
-and 80.3% of real families of two or more found intact. The 20% not found are
+and 81.4% of real families of two or more found intact. The 19% not found are
 families whose members never appear together on a policy with a stated
 relationship — no evidence, no household, which is the right answer rather than
 a guess.
@@ -267,7 +367,7 @@ forty-one.
 
 ---
 
-## 8. Process topology
+## 10. Process topology
 
 | Process | What it does | Scaling |
 |---|---|---|

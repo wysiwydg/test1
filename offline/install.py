@@ -35,6 +35,21 @@ SUPPORTED = {(3, 11), (3, 12), (3, 13)}
 TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
 
 
+def _extras() -> str:
+    """The cmdm extras to install, given what this wheelhouse actually carries.
+
+    `ai` brings onnxruntime, which nothing imports until a model is promoted in
+    the registry. Bundles cut before it was included do not have the wheel, and
+    asking for the extra there would fail the whole offline install over an
+    optional package -- so the extra is added only when the wheel is present,
+    rather than assumed from the version being installed.
+    """
+    base = "vector,store,api"
+    if any(WHEELS.glob("onnxruntime-*.whl")):
+        return f"{base},ai"
+    return base
+
+
 def say(message: str) -> None:
     print(f"  {message}", flush=True)
 
@@ -130,7 +145,8 @@ def main() -> int:
             "--find-links", str(WHEELS),        # resolve only from here
             "--disable-pip-version-check",
             "--no-warn-script-location",
-            *TOP_LEVEL,
+            f"cmdm[{_extras()}]",
+            *(spec for spec in TOP_LEVEL if not spec.startswith("cmdm[")),
         ],
         cwd=HERE, capture_output=True, text=True,
     )

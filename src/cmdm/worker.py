@@ -419,6 +419,87 @@ def _landed_frame(
 # ---------------------------------------------------------------------------
 
 
+def _models(connect_pool, *, promote: str | None, by: str | None,
+            note: str | None) -> int:
+    """List the model registry, or promote one model into service."""
+    from cmdm.models import list_models, promote_model
+
+    if promote:
+        if not by or not note:
+            log.error("promotion needs --by and --note: an approval nobody "
+                      "signed and nobody explained cannot be reviewed later")
+            return 1
+        with connect_pool() as conn:
+            try:
+                promote_model(conn, promote, promoted_by=by, note=note)
+            except (LookupError, ValueError) as exc:
+                log.error("%s", exc)
+                return 1
+            conn.commit()
+        log.info("promoted %s", promote)
+        return 0
+
+    with connect_pool() as conn:
+        registered = list_models(conn)
+    if not registered:
+        log.info("no models registered; both AI paths run their reference "
+                 "implementations")
+        return 0
+    for model in registered:
+        detail = ""
+        if model.metrics:
+            interesting = {k: v for k, v in model.metrics.items()
+                           if k in ("precision", "recall", "f1")}
+            detail = f"  {interesting}" if interesting else ""
+        warn = "" if model.runnable else "  [ARTIFACT MISSING OR CHANGED]"
+        log.info("%-14s %-14s %-8s %s%s%s", model.kind, model.model_name,
+                 model.version, model.state, detail, warn)
+    return 0
+
+
+def _evaluate(connect_pool, *, rows: int, duplicate_rate: float) -> int:
+    """Score what the store merged against what it should have merged.
+
+    Only meaningful over a benchmark extract -- one generated with
+    ``--duplicate-rate`` so that some parties genuinely arrive twice. Run
+    against the shipped extract it reports nothing to find, which is correct
+    and is why it says so rather than printing zeros.
+    """
+    from cmdm.evaluate import evaluate_matching
+    from scripts.generate_sample_data import duplicate_pairs
+
+    truth = duplicate_pairs(rows, duplicate_rate=duplicate_rate)
+    with connect_pool() as conn:
+        report = evaluate_matching(conn, truth)
+
+    if not report.evaluable_pairs:
+        log.warning(
+            "nothing to evaluate: this store holds no party that arrived under "
+            "two customer numbers. Load an extract generated with "
+            "`generate_sample_data --duplicate-rate 0.18` to measure matching."
+        )
+        return 0
+
+    log.info("match quality: %s", report.summary())
+    log.info("  blocking     %s of %s true pairs became candidates",
+             f"{report.blocked_pairs:,}", f"{report.evaluable_pairs:,}")
+    log.info("  merged       %s true, %s false, %s missed",
+             f"{report.true_positives:,}", f"{report.false_positives:,}",
+             f"{report.false_negatives:,}")
+    log.info("  the model    %s true positives (%.0f%% of all), %s false",
+             f"{report.ai_true_positives:,}",
+             report.ai_share_of_true_positives * 100,
+             f"{report.ai_false_positives:,}")
+    if report.clusters_with_a_wrong_member:
+        log.warning("  %s golden parties hold keys naming different real "
+                    "people; the largest holds %s",
+                    f"{report.clusters_with_a_wrong_member:,}",
+                    report.largest_wrong_cluster)
+    for example in report.examples:
+        log.info("  wrong merge: %s", example)
+    return 0
+
+
 def stale_key_kinds(conn: psycopg.Connection, mappings: list[SourceMapping]) -> dict[str, int]:
     """Key kinds in the crosswalk that no installed mapping declares any more.
 
@@ -619,7 +700,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Drain the ingest queue, or mine standardization rules.",
     )
     parser.add_argument(
-        "command", choices=("serve", "once", "mine", "backfill", "rebuild", "check"),
+        "command",
+        choices=("serve", "once", "mine", "backfill", "rebuild", "check",
+                 "evaluate", "models"),
         nargs="?", default="serve",
     )
     parser.add_argument("--queue", default=QUEUE_STANDARDIZE)
@@ -632,6 +715,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--min-evidence", type=int, default=None,
         help="mine: occurrences a pattern needs before a rule is proposed",
     )
+    parser.add_argument(
+        "--duplicate-rate", type=float, default=0.18,
+        help="evaluate: the rate the benchmark extract was generated with",
+    )
+    parser.add_argument(
+        "--rows", type=int, default=5000,
+        help="evaluate: how many rows the benchmark extract has",
+    )
+    parser.add_argument(
+        "--promote", metavar="MODEL_ID",
+        help="models: promote this model to ACTIVE for its kind",
+    )
+    parser.add_argument("--by", help="models: who is approving the promotion")
+    parser.add_argument("--note", help="models: why, in one line")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -641,6 +738,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     from cmdm.db.engine import connect as connect_pool
+
+    if args.command == "models":
+        return _models(connect_pool, promote=args.promote, by=args.by,
+                       note=args.note)
+
+    if args.command == "evaluate":
+        return _evaluate(connect_pool, rows=args.rows,
+                         duplicate_rate=args.duplicate_rate)
 
     if args.command == "mine":
         with connect_pool() as conn:

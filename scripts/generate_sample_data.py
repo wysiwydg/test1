@@ -158,18 +158,53 @@ def _phone(rng: random.Random) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_population(rng: random.Random, households_wanted: int) -> dict:
+def _build_population(
+    rng: random.Random, households_wanted: int, duplicate_rate: float = 0.0
+) -> dict:
     """Households, their members, and the legal entities attached to them.
 
     A household is an address and a surname shared by up to two adults and
     their children. Everything structural in the extract hangs off this: who
     owns a policy on whom, which trust holds it, and which of the people at one
     address are actually a family.
+
+    ``duplicate_rate`` gives that share of adults a *second* customer number,
+    which is the failure entity resolution exists for and which the default
+    extract does not contain. With one customer-number space per source, a party
+    that always arrives under the same number is matched deterministically
+    before any scoring runs -- correct, and it means the probabilistic pass has
+    nothing to find and cannot be measured.
+
+    A real book gets these constantly: a customer re-registers, a migration
+    lands the same person twice, a broker keys them again rather than searching.
+    The duplicate carries degraded attributes on purpose -- a name variant, a
+    missing date of birth, a different email -- because a duplicate with
+    identical attributes is found by exact matching and measures nothing either.
     """
     people: list[dict] = []
     households: list[dict] = []
     entities: list[dict] = []
     next_person = 0
+
+    # Legal entity names are unique, because company and trust registries make
+    # them unique. Two different companies sharing a registered name is not a
+    # hard case for a matcher, it is an impossible one -- and left in the
+    # fixture it depresses measured precision for a reason that has nothing to
+    # do with the matcher. Collisions are qualified the way a real registrar
+    # forces them to be: by locality, then by number.
+    taken: set[str] = set()
+
+    def unique_name(candidate: str, city: str) -> str:
+        if candidate not in taken:
+            taken.add(candidate)
+            return candidate
+        qualified = f"{candidate} ({city})"
+        suffix = 2
+        while qualified in taken:
+            qualified = f"{candidate} ({city} {suffix})"
+            suffix += 1
+        taken.add(qualified)
+        return qualified
 
     def add_person(**kw) -> dict:
         nonlocal next_person
@@ -241,8 +276,10 @@ def _build_population(rng: random.Random, households_wanted: int) -> dict:
         if roll < 0.10:
             entities.append({
                 "key": f"ORG-T{household['id']:05d}",
-                "name": rng.choice(["{s} Family Trust", "The {s} Trust"]).format(
-                    s=household["surname"]),
+                "name": unique_name(
+                    rng.choice(["{s} Family Trust", "The {s} Trust"]).format(
+                        s=household["surname"]),
+                    household["address"]["city"]),
                 "kind": "TRUST", "address": household["address"],
                 "household": household["id"], "insures": household["members"],
                 "relationship": TRUSTEE,
@@ -252,7 +289,9 @@ def _build_population(rng: random.Random, households_wanted: int) -> dict:
             deceased["deceased"] = True
             entities.append({
                 "key": f"ORG-E{household['id']:05d}",
-                "name": f"Estate of {deceased['given']} {deceased['surname']}",
+                "name": unique_name(
+                    f"Estate of {deceased['given']} {deceased['surname']}",
+                    household["address"]["city"]),
                 "kind": "ESTATE", "address": household["address"],
                 "household": household["id"], "insures": [deceased],
                 "relationship": EXECUTOR,
@@ -266,15 +305,40 @@ def _build_population(rng: random.Random, households_wanted: int) -> dict:
         directors = rng.sample(adults, k=min(len(adults), rng.choice([2, 2, 3])))
         entities.append({
             "key": f"ORG-C{c:05d}",
-            "name": rng.choice(["{s} Holdings Ltd", "{s} & Sons Pty Ltd",
-                                "{s} Group plc"]).format(
-                s=rng.choice(directors)["surname"]),
-            "kind": "COMPANY", "address": _address(rng, BUSINESS_STREETS),
+            "address": (business := _address(rng, BUSINESS_STREETS)),
+            "name": unique_name(
+                rng.choice(["{s} Holdings Ltd", "{s} & Sons Pty Ltd",
+                            "{s} Group plc"]).format(
+                    s=rng.choice(directors)["surname"]),
+                business["city"]),
+            "kind": "COMPANY",
             "household": None, "insures": directors, "relationship": EMPLOYER,
         })
 
+    # Second customer numbers, drawn after everyone exists so the choice does
+    # not perturb household construction. Recorded on the person rather than as
+    # a separate party: they *are* the same person, and that is the ground truth
+    # the matcher is scored against.
+    duplicated = []
+    if duplicate_rate > 0:
+        adults = [p for p in people if p["generation"] == "ADULT"
+                  and not p.get("flatmate")]
+        for person in rng.sample(adults, k=int(len(adults) * duplicate_rate)):
+            person["alt_key"] = f"D-{person['id']:06d}"
+            person["alt_degraded"] = {
+                # Which attributes the second registration lost or changed.
+                # Never all of them: a record with nothing in common is not a
+                # duplicate anybody could be expected to find, and scoring the
+                # matcher against it measures the generator's cruelty instead.
+                "dob": rng.random() < 0.45,
+                "email": rng.random() < 0.60,
+                "phone": rng.random() < 0.35,
+                "address": rng.random() < 0.25,
+            }
+            duplicated.append(person)
+
     return {"people": people, "households": households, "entities": entities,
-            "flatmates": flatmates}
+            "flatmates": flatmates, "duplicated": duplicated}
 
 
 def _party_pair(rng: random.Random, population: dict) -> tuple[dict, dict, str]:
@@ -318,16 +382,25 @@ def _party_pair(rng: random.Random, population: dict) -> tuple[dict, dict, str]:
     return person, person, SELF
 
 
-def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
+def generate(
+    rows: int, seed: int = 20240807, duplicate_rate: float = 0.0
+) -> list[dict[str, str]]:
     """Build the extract.
 
     Parties are sampled *with replacement* from a fixed population, so the same
     person genuinely recurs across policies and across roles. Without that,
     entity resolution would have nothing to find and the sample would flatter
     the system.
+
+    ``duplicate_rate`` above zero produces a *benchmark* extract: some parties
+    arrive under two customer numbers, so the probabilistic matcher has genuine
+    duplicates to find and its precision and recall become measurable. The
+    default is zero, which keeps the shipped extract exactly as it was.
     """
     rng = random.Random(seed)
-    population = _build_population(rng, households_wanted=max(4, rows // 6))
+    population = _build_population(
+        rng, households_wanted=max(4, rows // 6), duplicate_rate=duplicate_rate
+    )
 
     agents = [
         {"code": f"AGT-{1000 + i}",
@@ -363,9 +436,14 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
         ][rng.randrange(3)]
 
         def party_cols(prefix: str, p: dict, name: str, dob: str,
-                       gender: str) -> dict[str, str]:
+                       gender: str, degraded: dict | None = None) -> dict[str, str]:
             blank = rng.random()
             address = p["address"]
+            degraded = degraded or {}
+            if degraded.get("dob"):
+                dob = ""
+            if degraded.get("address"):
+                address = _address(rng, STREETS)
             return {
                 f"{prefix}Name": name,
                 f"{prefix}DOB": dob,
@@ -374,13 +452,14 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
                 # derived from the name alone would hand two different people
                 # with the same name an identical email, which no matcher can
                 # see past -- it would measure the generator, not the matcher.
-                f"{prefix}Email": "" if blank < 0.25 else (
+                f"{prefix}Email": "" if (blank < 0.25 or degraded.get("email"))
+                    else (
                     f"{p.get('given', 'contact').lower()}."
                     f"{p.get('surname', 'admin').lower()}{p.get('id', 0)}@example.com"
                     .replace("'", "").replace("é", "e").replace("ñ", "n")
                     .replace("ü", "u").replace(" ", "")),
-                f"{prefix}Phone": "" if blank < 0.15 else
-                    _fmt_phone(p.get("phone") or "2079460000", rng.randrange(4)),
+                f"{prefix}Phone": "" if (blank < 0.15 or degraded.get("phone"))
+                    else _fmt_phone(p.get("phone") or "2079460000", rng.randrange(4)),
                 f"{prefix}Address1": f"{address['street_no']} {address['street']}",
                 f"{prefix}Address2": "" if rng.random() < 0.8
                     else f"Flat {rng.randrange(1, 12)}",
@@ -391,11 +470,17 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
                 f"{prefix}Occupation": p.get("occupation", ""),
             }
 
+        # A party with a second customer number arrives under it about half the
+        # time, carrying whatever that registration lost.
+        owner_alt = (not owner_is_entity and owner.get("alt_key")
+                     and rng.random() < 0.5)
+        insured_alt = insured.get("alt_key") and rng.random() < 0.5
+
         if owner_is_entity:
             owner_key, owner_name = owner["key"], owner["name"]
             owner_dob = owner_gender = ""
         else:
-            owner_key = owner["key"]
+            owner_key = owner["alt_key"] if owner_alt else owner["key"]
             owner_name = _vary_name(rng, owner["given"], owner["middle"],
                                     owner["surname"])
             owner_dob = _fmt_date(owner["dob"], ds)
@@ -438,22 +523,66 @@ def generate(rows: int, seed: int = 20240807) -> list[dict[str, str]]:
             # real extract, and a derivation that only works where the source
             # filled the field in is a derivation that does not work.
             "OwnerRelationshipToInsured": "" if rng.random() < 0.08 else relationship,
-            "InsuredCustomerId": insured["key"],
+            "InsuredCustomerId": (insured["alt_key"] if insured_alt
+                                 else insured["key"]),
             "AgentCode": agent["code"],
             "AgentName": agent["name"],
             "AgentEmail": f"{agent['code'].lower()}@broker.example.com",
             "AgentPhone": _fmt_phone(_phone(rng), 1),
         }
-        row.update(party_cols("Owner", owner, owner_name, owner_dob, owner_gender))
+        row.update(party_cols(
+            "Owner", owner, owner_name, owner_dob, owner_gender,
+            owner.get("alt_degraded") if owner_alt else None,
+        ))
         row.update(party_cols(
             "Insured", insured,
             _vary_name(rng, insured["given"], insured["middle"], insured["surname"]),
             _fmt_date(insured["dob"], rng.randrange(3)),
             insured["gender"],
+            insured.get("alt_degraded") if insured_alt else None,
         ))
         out.append(row)
 
     return out
+
+
+def ground_truth(
+    rows: int, seed: int = 20240807, duplicate_rate: float = 0.0
+) -> dict[str, set[str]]:
+    """Which source keys name the same real person.
+
+    The answer key for the match-quality harness, produced by the same
+    deterministic construction as the extract, so it cannot drift from it. Maps
+    a canonical key to every key that refers to that person -- one entry per
+    party, with two keys for the duplicated ones.
+
+    Deliberately *not* derived from the CSV. Ground truth read back out of the
+    thing being measured is not ground truth.
+    """
+    rng = random.Random(seed)
+    population = _build_population(
+        rng, households_wanted=max(4, rows // 6), duplicate_rate=duplicate_rate
+    )
+    truth: dict[str, set[str]] = {}
+    for person in population["people"]:
+        keys = {person["key"]}
+        if person.get("alt_key"):
+            keys.add(person["alt_key"])
+        truth[person["key"]] = keys
+    return truth
+
+
+def duplicate_pairs(
+    rows: int, seed: int = 20240807, duplicate_rate: float = 0.0
+) -> set[tuple[str, str]]:
+    """Every pair of source keys that a perfect matcher would merge."""
+    pairs = set()
+    for keys in ground_truth(rows, seed, duplicate_rate).values():
+        ordered = sorted(keys)
+        for i, left in enumerate(ordered):
+            for right in ordered[i + 1:]:
+                pairs.add((left, right))
+    return pairs
 
 
 def describe(rows: int, seed: int) -> dict[str, int]:
@@ -485,11 +614,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20240807)
+    parser.add_argument(
+        "--duplicate-rate", type=float, default=0.0, metavar="RATE",
+        help="give this share of adults a second customer number, producing a "
+             "benchmark extract the matcher can be scored against. Default 0, "
+             "which reproduces the shipped extract byte for byte.",
+    )
     parser.add_argument("--out", type=pathlib.Path,
                         default=REPO / "data" / "life_admin_sample.csv")
     args = parser.parse_args(argv)
 
-    rows = generate(args.rows, args.seed)
+    rows = generate(args.rows, args.seed, args.duplicate_rate)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
@@ -500,6 +635,10 @@ def main(argv: list[str] | None = None) -> int:
     print("\nground truth in this extract:")
     for name, value in describe(args.rows, args.seed).items():
         print(f"  {name.replace('_', ' '):28} {value:,}")
+    if args.duplicate_rate:
+        pairs = duplicate_pairs(args.rows, args.seed, args.duplicate_rate)
+        print(f"  {'parties with a second key':28} {len(pairs):,}")
+        print(f"  {'true duplicate pairs to find':28} {len(pairs):,}")
     return 0
 
 

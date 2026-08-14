@@ -34,6 +34,7 @@ from cmdm.resolve.crossencoder import (
     AI_ACCEPT_THRESHOLD,
     CrossEncoder,
     classify_grey_zone,
+    get_cross_encoder,
 )
 from cmdm.resolve.scoring import (
     AUTO_MATCH_THRESHOLD,
@@ -128,6 +129,12 @@ def resolve(
     ai_threshold: float = AI_ACCEPT_THRESHOLD,
     id_column: str = "person_id",
     conn: psycopg.Connection | None = None,
+    #: Read-only connection used solely to ask the registry which model is
+    #: approved. Separate from ``conn``, which is the write path the orchestrator
+    #: deliberately withholds here — the ledger is persisted by the caller once
+    #: golden ids exist, and handing this stage a write connection would invite
+    #: it to write them early.
+    registry_conn: psycopg.Connection | None = None,
     decisions: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[ClusterResult, pl.DataFrame, ResolutionReport]:
     """Run the full resolution pipeline.
@@ -182,7 +189,9 @@ def resolve(
     grey = scored.filter(pl.col("zone") == Zone.GREY)
     if grey.height:
         grey_scored, verdicts = classify_grey_zone(
-            grey, parties, encoder=encoder, threshold=ai_threshold, id_column=id_column
+            grey, parties,
+            encoder=encoder or get_cross_encoder(registry_conn),
+            threshold=ai_threshold, id_column=id_column
         )
         report.model_name = verdicts[0].model_name if verdicts else "none"
         report.ai_approved = int((grey_scored["ai_decision"] == "MATCH").sum())

@@ -24,18 +24,21 @@ and probabilistic passes abstain.
 | Stage | Result |
 |---|---|
 | Shredding | 22,400 policies/s, one wide row → three grains |
-| Standardization | deterministic pass **86.4%**, gate pass **99.1%** after the model, AI share **13.0%** |
-| Blocking | 2.9M possible pairs → 11,787 candidates, **248× reduction** |
-| Grey zone | **1.05%** of candidate pairs reach a model; 41 merged, 83 held apart |
-| Vetoes | 1,789 pairs refused on conflicting DOB or person-vs-entity, whatever they scored |
-| Full pipeline | 5,000 policies → 2,386 golden persons, 15,000 edges, 598 households in **~5 s**, one transaction |
-| Re-processing | writes **0 changes**, 22,386 rows unchanged |
-| Householding | 598 households, **every one a single real family**, 0 flatmates wrongly included, 80.3% of real families found |
-| Audit | 11,787 pair decisions and 314 model invocations retained, **including every rejection** |
+| Standardization | deterministic pass **86.3%**, gate pass **99.1%** after the model, AI share **13.0%** |
+| Blocking | 2.9M possible pairs → 11,931 candidates, **243× reduction** |
+| Grey zone | **0.81%** of candidate pairs reach a model; 18 merged, 79 held apart |
+| Vetoes | 1,796 pairs refused on conflicting DOB or person-vs-entity, whatever they scored |
+| Full pipeline | 5,000 policies → 2,389 golden persons, 15,000 edges, 597 households in **~4 s**, one transaction |
+| Re-processing | writes **0 changes**, 22,389 rows unchanged |
+| Householding | 597 households, **every one a single real family**, 0 flatmates wrongly included, 81.4% of real families found |
+| Audit | 11,931 pair decisions and 314 model invocations retained, **including every rejection** |
+| Match quality | on a benchmark with a known answer key: precision **0.94**, recall **0.72**, blocking recall **0.93** |
 
-All figures from `data/life_admin_sample.csv` (5,000 policies, 2,419 source
+All figures from `data/life_admin_sample.csv` (5,000 policies, 2,407 source
 identities), against a real PostgreSQL 16 instance. Reproduce with
-`python -m scripts.generate_sample_data` then `./verify.sh`.
+`python -m scripts.generate_sample_data` then `./verify.sh`. Match quality is
+measured separately, against an extract whose duplicates are known:
+`python -m cmdm.worker evaluate --rows 2000 --duplicate-rate 0.18`.
 
 ---
 
@@ -137,10 +140,12 @@ src/cmdm/ui/
     console.py      Ingestion, steward and business consoles, server-rendered
 src/cmdm/export.py      Entity dashboard, and the delivered extract with MDM ids
 src/cmdm/household.py   Households and affiliations, from stated relationships
+src/cmdm/models.py      Model registry — which model may run, on what evidence
+src/cmdm/evaluate.py    Match quality against known ground truth
 src/cmdm/observe/
     metrics.py      Operational, match-quality and data-quality metrics
 src/cmdm/pipeline.py    End-to-end orchestration
-src/cmdm/worker.py      Queue drainer, batch processor, rule miner (CLI)
+src/cmdm/worker.py      Queue drainer, batch processor, rule miner, evaluator (CLI)
 src/cmdm/mappings/
     life_admin.toml Example source mapping
 src/cmdm/sql/
@@ -151,6 +156,7 @@ src/cmdm/sql/
     005_governance.sql      Principals, consent, erasure, audit
     006_match_pair_identity.sql  The ledger keys on what was compared
     007_households.sql      Households, affiliations, stated relationships
+    008_model_registry.sql  Registered models, their evidence, their approver
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
@@ -264,8 +270,8 @@ export CMDM_ID_HASH_KEY="…"   # never stored in the database
   alone ties; the identity triple does not. Without that, a threaded group-by
   picked a different winner each run and customers' names changed overnight.
 - **A derived value comes from the record that won its parent.** `full_name` and
-  `full_name_normalized` picked their winners independently, so 290 of 2,712
-  records were searchable only under a name they did not display.
+  `full_name_normalized` picked their winners independently, so 290 records
+  were searchable only under a name they did not display.
 - **A steward's verdict is an input to the next run**, recorded as a fixed edge
   rather than applied to the store. The book does not change under whoever is
   reading it, and the review is spent once.

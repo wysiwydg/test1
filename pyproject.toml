@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cmdm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source, Python-native Customer Master Data Management for insurance data"
 readme = "README.md"
 requires-python = ">=3.11"

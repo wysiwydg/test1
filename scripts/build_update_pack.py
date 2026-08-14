@@ -77,15 +77,26 @@ def _declared_dependencies() -> set[str]:
     """Distribution names this release needs *in a bundle*.
 
     Read from the same TOP_LEVEL list the bundle builder installs from, not
-    from every extra in pyproject: the dev extras and the optional ONNX runtime
-    are deliberately not in a bundle, and listing them here would make every
-    update refuse itself for packages the target was never meant to have.
+    from every extra in pyproject: the dev extras are deliberately not in a
+    bundle, and listing them here would make every update refuse itself for
+    packages the target was never meant to have.
+
+    Minus what a bundle carries but does not need to run. onnxruntime is in a
+    bundle so a model can be promoted on a machine with no internet, but it is
+    imported only once one has been; a bundle cut before it was included runs
+    this release perfectly well without it, and refusing that bundle an update
+    would cost it every other fix in the release over a package its code never
+    reaches for.
 
     Compared on the target against what its wheelhouse holds, so an update that
     would leave a machine unable to import its own code is refused while there
     is still something to be done about it.
     """
-    from scripts.build_offline_bundle import TOP_LEVEL, _requirements
+    from scripts.build_offline_bundle import (
+        OPTIONAL_AT_RUNTIME,
+        TOP_LEVEL,
+        _requirements,
+    )
 
     document = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     specs = list(document["project"].get("dependencies", []))
@@ -99,7 +110,7 @@ def _declared_dependencies() -> set[str]:
             name = name.split(terminator)[0]
         if name:
             names.add(name.strip().lower().replace("_", "-"))
-    return names
+    return names - {n.lower().replace("_", "-") for n in OPTIONAL_AT_RUNTIME}
 
 
 def build(out_dir: pathlib.Path) -> pathlib.Path:
@@ -178,6 +189,44 @@ def _update_md(version: str) -> str:
 You do not need the 150 MB bundle again. Nothing in it changed except this
 project's own wheel: the PostgreSQL binaries, polars, scipy and the rest are the
 same files you already have.
+
+## What is in this release
+
+**A model registry.** Which local model runs was an environment variable
+pointing at a file — swapping it was a deployment action with no measurement,
+no approval and no trace, which is the one kind of change this system refuses
+everywhere else. A model version now moves through the states a standardization
+rule moves through (CANDIDATE, SHADOW, ACTIVE, RETIRED), and the database
+refuses an ACTIVE model that was never evaluated or that nobody signed for. The
+artifact is fingerprinted at registration, so a model file that changed after it
+was approved is refused at load time rather than quietly run.
+
+Nothing changes for you if you have no model file: with nothing promoted, both
+AI paths run their reference implementations, exactly as before.
+
+```
+worker.cmd models                                  what is registered, what runs
+worker.cmd models --promote <id> --by "you" --note "why"
+```
+
+**A match-quality harness.** Every other number the consoles show goes *up* when
+matching gets too eager, right up until a policy is attached to a stranger. This
+measures against an extract whose duplicates are known, and reports precision,
+recall, blocking recall and the worst wrongly-merged cluster, with examples
+named:
+
+```
+worker.cmd evaluate --rows 2000 --duplicate-rate 0.18
+```
+
+It lands rows, so point it at a scratch store rather than your working one.
+
+**A fixture correction.** The sample generator could give two legal entities the
+same registered name, which is impossible in reality and dragged measured
+precision down by 14 points for a reason that had nothing to do with matching.
+Fixing it changes the shipped extract, so the reference figures move slightly:
+2,389 golden persons (was 2,386) and 597 households (was 598). Both are the more
+correct answer — four identically-named trusts now stay distinct.
 
 ## Run it
 

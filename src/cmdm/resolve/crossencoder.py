@@ -43,6 +43,7 @@ __all__ = [
     "OnnxCrossEncoder",
     "NICKNAMES",
     "classify_grey_zone",
+    "get_cross_encoder",
     "AI_ACCEPT_THRESHOLD",
 ]
 
@@ -313,6 +314,33 @@ class OnnxCrossEncoder:
                 exp = np.exp(logits - logits.max(axis=1, keepdims=True))
                 scores.extend((exp / exp.sum(axis=1, keepdims=True))[:, -1])
         return np.asarray(scores, dtype=np.float32)
+
+
+def get_cross_encoder(conn: Any = None) -> CrossEncoder:
+    """The grey-zone classifier this store has approved, or the reference one.
+
+    Same order and same reasoning as :func:`cmdm.standardize.ai.get_standardizer`
+    — the registry outranks the environment variable, because a model somebody
+    measured and signed for should not be silently displaced by a deployment
+    setting.
+    """
+    import os
+
+    if conn is not None:
+        from cmdm.models import ModelKind, active_model
+
+        approved = active_model(conn, ModelKind.CROSS_ENCODER)
+        if approved and approved.artifact_path:
+            if not approved.runnable:
+                raise RuntimeError(
+                    f"{approved.model_name} {approved.version} is the approved "
+                    "cross-encoder but its artifact is missing or has changed "
+                    "since it was evaluated"
+                )
+            return OnnxCrossEncoder(approved.artifact_path)
+
+    path = os.environ.get("CMDM_CROSSENCODER_MODEL")
+    return OnnxCrossEncoder(path) if path else FeatureCrossEncoder()
 
 
 def classify_grey_zone(
