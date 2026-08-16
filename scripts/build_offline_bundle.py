@@ -52,7 +52,7 @@ TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
 #: bundle cut before this line existed would be refused an update over a package
 #: its code never imports. And it needs a wider set of platform tags than the
 #: rest -- see EXTRA_PLATFORM_TAGS.
-OPTIONAL = ["onnxruntime>=1.18", "reflex>=0.9.8"]
+OPTIONAL = ["onnxruntime>=1.18"]
 
 #: Names in OPTIONAL, for the update pack to subtract. Derived rather than
 #: written twice, because two lists that must agree eventually will not.
@@ -87,8 +87,7 @@ PGSERVER_BUILD_PYTHON = "3.12"
 #: Copied verbatim into the bundle. The source tree ships alongside the wheel so
 #: the tests can run on the target and an operator can read what they are about
 #: to run.
-PAYLOAD = ["src", "tests", "scripts", "docs", "rxapp", "pyproject.toml",
-           "README.md"]
+PAYLOAD = ["src", "tests", "scripts", "docs", "pyproject.toml", "README.md"]
 
 #: The updater belongs to an update pack, not to a bundle, and is deliberately
 #: left out of one.
@@ -126,13 +125,6 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
 
     _optional_wheels(wheels, platform, python)
     _complete_closure(wheels, platform, python)
-
-    # Before the wheel is built, so the compiled frontend is inside it. The
-    # target has no Node and never will; this is the step that makes that fine.
-    print("compiling the Reflex frontend")
-    from scripts.build_reflex_frontend import build as build_frontend
-
-    build_frontend(keep_going=True)
     _postgres_binaries(staging, platform, python)
 
     print("building the cmdm wheel")
@@ -142,22 +134,7 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
         source = REPO / name
         target = staging / name
         if source.is_dir():
-            shutil.copytree(
-                source, target,
-                # `.web` is Reflex's build tree: 200 MB of node_modules that
-                # exists only on a build host and must never reach a target,
-                # which has no Node to use it with. The compiled output is
-                # already inside the wheel.
-                ignore=shutil.ignore_patterns(
-                    "__pycache__", ".web", "*.zip",
-                    # Reflex pickles live session state under .states.
-                    # It is a build host's own sessions -- including,
-                    # after any local sign-in, the API key that was
-                    # pasted in. Shipping it would put one machine's
-                    # credentials in every copy of the bundle.
-                    ".states", "*.pkl", "*.db",
-                ),
-            )
+            shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
         else:
             shutil.copy2(source, target)
 

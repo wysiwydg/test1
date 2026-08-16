@@ -77,7 +77,15 @@ header { border-bottom: 1px solid var(--line); padding: 14px 24px;
 header h1 { font-size: 17px; margin: 0; font-weight: 650; }
 header nav a { color: var(--accent); text-decoration: none; margin-right: 16px; font-size: 14px; }
 header .who { margin-left: auto; color: var(--muted); font-size: 13px; }
-main { padding: 22px 24px; max-width: 1180px; }
+/* 1180px is the right cap for a column of prose and the wrong one for a
+   grid of panels: on a wide monitor it showed one panel and a stretch of
+   empty margin, which is what made the old customer page a scrolling
+   exercise. The panels have their own minimum widths, so a wider ceiling
+   lets them form columns instead of queueing. */
+main { padding: 22px 24px; max-width: 1500px; }
+/* Prose pages keep the narrower measure -- a paragraph 1400px wide is
+   unreadable, and this cap is what keeps the two from fighting. */
+main > p.note, main > h2 + p.note { max-width: 78ch; }
 h2 { font-size: 15px; margin: 26px 0 10px; font-weight: 650; }
 h2:first-child { margin-top: 0; }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -116,6 +124,52 @@ button.secondary { background: var(--chip); color: var(--fg); }
 .bar { height: 6px; background: var(--chip); border-radius: 3px; overflow: hidden;
   width: 130px; display: inline-block; vertical-align: middle; }
 .bar > i { display: block; height: 100%; background: var(--accent); }
+
+/* --- the customer view -------------------------------------------------
+   A 360 is eight panels that want to be read together. A single fixed
+   column shows one of them and a lot of empty margin on a wide monitor,
+   so the operator scrolls instead of comparing.
+
+   `auto-fit` with a `minmax` track is what makes this respond to the
+   *container* rather than to a guessed set of device widths: the browser
+   fits as many columns as will hold the minimum and stretches them to
+   fill. Adding a panel needs no breakpoint, and neither does dragging the
+   window narrower. */
+.grid { display: grid; gap: 14px; align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 15px 17px;
+  min-width: 0; }
+.card > h2:first-child { margin-top: 0; }
+.card table { font-size: 13px; }
+/* Wide content scrolls inside its own card. Letting the page scroll
+   sideways instead would take the navigation off screen with it. */
+.card .wide { max-width: 100%; }
+.stats { display: grid; gap: 16px 20px; margin: 0 0 4px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.stats .v { font-size: 23px; font-weight: 600; display: block; line-height: 1.15;
+  font-variant-numeric: tabular-nums; }
+.stats .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase;
+  letter-spacing: .04em; }
+/* One policy and, directly under it, the other parties on that contract.
+   A second table beside the first would make the reader join them by
+   policy number by eye. */
+.pol { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.pol:last-child { border-bottom: 0; }
+.pol .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.pol .num { font-weight: 650; }
+.pol .money { margin-left: auto; font-variant-numeric: tabular-nums;
+  white-space: nowrap; }
+.pol .prod { color: var(--muted); font-size: 12.5px; }
+.pol .with { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.rel { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 7px 0; border-bottom: 1px solid var(--line); }
+.rel:last-child { border-bottom: 0; }
+.rel .ev { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.flag { color: var(--bad); }
+@media (max-width: 62em) {
+  main { padding: 16px 14px; }
+  header { padding: 12px 14px; }
+}
 """
 
 
@@ -351,127 +405,319 @@ def person_detail(
     conn: ConnectionDep,
     principal: PrincipalDep,
 ) -> HTMLResponse:
-    """One golden record, with the lineage behind every contested value.
+    """One party, and everything the store links to it.
 
-    The lineage is on the same page rather than behind a tab because "why
-    does it say that" is asked at the same moment as "what does it say", and
-    separating them means most users never see the answer.
+    A golden record on its own answers "what do we believe about this person"
+    and leaves unanswered the question operators actually arrive with: *what is
+    this party connected to?* A party in an insurance book is a node in a graph,
+    and every panel here is one kind of edge leaving it.
+
+    The policy panels carry the other parties on each contract inline, because
+    "five policies" is a fact about a row while "two of them are cover on his
+    son, written by the agent who also services his mother's policy" is the
+    thing somebody picked up the phone to find out.
+
+    Panels are ordered by how often a question is asked, not by how the data is
+    stored: identity, then what they hold, then who they are connected to, then
+    why the record says what it says, and last what the matcher considered. That
+    one is last because it is the most specialised, and present at all because
+    "why are these two *not* the same person" has no other answer.
     """
     _guard(principal, Action.READ, conn)
 
-    from cmdm.store.writer import resolve_person_id
+    from cmdm.ui.data import load_customer_360
 
-    resolved = resolve_person_id(conn, person_id)
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM mdm.person WHERE person_id = %s AND is_current", (resolved,)
-        )
-        record = cur.fetchone()
-        if record is None:
-            raise HTTPException(status_code=404, detail="person not found")
+    found = load_customer_360(conn, person_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="person not found")
 
-        cur.execute(
-            """
-            SELECT attribute_name, strategy, winning_source_system, value_text,
-                   candidate_count, rejected_values
-            FROM mdm.attribute_provenance
-            WHERE entity_id = %s ORDER BY attribute_name
-            """,
-            (resolved,),
-        )
-        lineage = [dict(r) for r in cur.fetchall()]
-
-        cur.execute(
-            """
-            SELECT source_system, source_key_kind, source_party_key, is_active,
-                   derivation_method
-            FROM mdm.person_xref WHERE person_id = %s ORDER BY source_system
-            """,
-            (resolved,),
-        )
-        sources = [dict(r) for r in cur.fetchall()]
-
-        cur.execute(
-            "SELECT version, valid_from, valid_to FROM mdm.person "
-            "WHERE person_id = %s ORDER BY version DESC LIMIT 10",
-            (resolved,),
-        )
-        versions = [dict(r) for r in cur.fetchall()]
-
-    frame = pl.DataFrame([dict(record)], strict=False)
+    record = found.record
+    frame = pl.DataFrame([record], strict=False)
     masked, revealed = mask_frame(frame, PERSON, principal)
     shown = masked.row(0, named=True)
     log_access(conn, principal, Action.READ, entity_name="Person",
-               entity_id=resolved, pii_revealed=revealed)
+               entity_id=found.person_id, pii_revealed=revealed)
 
-    interesting = [
-        "full_name", "party_type", "date_of_birth", "email_address", "phone_e164",
-        "address_normalized", "postal_code", "country_code", "occupation",
-        "do_not_contact", "is_deceased", "source_count", "confidence",
-    ]
-    body = [f"<h2>{_esc(shown.get('full_name'))}</h2>"]
-    if str(person_id) != str(resolved):
+    def reveal(value: Any) -> str:
+        return _esc(value) if revealed else MASK
+
+    body: list[str] = []
+
+    # --- identity -------------------------------------------------------
+    flags = []
+    if record.get("do_not_contact"):
+        flags.append('<span class="chip flag">do not contact</span>')
+    if record.get("is_deceased"):
+        flags.append('<span class="chip">deceased</span>')
+    body.append(
+        f'<h2 style="font-size:22px;margin:0 0 4px">{_esc(shown.get("full_name"))}'
+        f' <span class="chip">{_esc(record.get("party_type"))}</span> '
+        + " ".join(flags) + "</h2>"
+    )
+    body.append(f'<p class="id" style="color:var(--muted);margin:0 0 14px">'
+                f'{_esc(found.person_id)}</p>')
+    if found.was_merged_id:
         body.append(
             f'<p class="note">The id you followed was merged into '
-            f"<code>{_esc(resolved)}</code>. Published ids keep resolving.</p>"
+            f"<code>{_esc(found.person_id)}</code>. Published ids keep "
+            "resolving, so a link saved months ago still lands here.</p>"
         )
-    body.append("<table><tbody>")
-    for key in interesting:
-        if key in shown:
-            body.append(
-                f'<tr><th style="width:200px">{_esc(key)}</th>'
-                f"<td>{_esc(shown[key])}</td></tr>"
-            )
-    body.append("</tbody></table>")
 
-    body.append(_household_panel(conn, resolved, revealed))
+    # --- the headline figures -------------------------------------------
+    cover = found.total_sum_assured
+    body.append(
+        '<div class="card"><div class="stats">'
+        + _stat(len(found.policies), "policy roles")
+        + _stat(f"{cover:,.0f}" if cover else "—", "cover held")
+        + _stat(len(found.household_members), "household")
+        + _stat(len(found.sources), "source keys")
+        + _stat(len(found.lineage), "contested")
+        + "</div></div>"
+    )
 
-    body.append("<h2>Contributing sources</h2><table><thead><tr><th>System</th>"
-                "<th>Key kind</th><th>Key</th><th>Active</th><th>How</th>"
-                "</tr></thead><tbody>")
-    for source in sources:
-        body.append(
+    # --- what they hold --------------------------------------------------
+    roles_on: dict[str, list[str]] = {}
+    for policy in found.policies:
+        roles_on.setdefault(policy.policy_id, []).append(policy.role)
+
+    for group in found.groups_present:
+        body.append(f'<div class="card"><h2>{_esc(_GROUP_LABEL[group])}</h2>')
+        body.append(f'<p class="note">{_esc(_GROUP_HINT[group])}</p>')
+        for policy in found.by_group(group):
+            body.append(_policy_row(policy, roles_on, revealed))
+        body.append("</div>")
+
+    # --- who they are connected to ---------------------------------------
+    body.append('<div class="grid">')
+    body.append(_household_card(found, revealed))
+    body.append(_affiliation_card(found))
+    body.append("</div>")
+
+    # --- where it came from ----------------------------------------------
+    body.append('<div class="grid">')
+    body.append(_sources_card(found, revealed))
+    body.append(_versions_card(found))
+    body.append("</div>")
+
+    body.append(_lineage_card(found, revealed))
+    body.append(_considered_card(found))
+
+    return _page("Customer", principal, "".join(body), active="business")
+
+
+def _stat(value: Any, label: str) -> str:
+    return (f'<div><span class="v">{_esc(value)}</span>'
+            f'<span class="k">{_esc(label)}</span></div>')
+
+
+def _policy_row(policy: Any, roles_on: dict[str, list[str]], revealed: bool) -> str:
+    """One policy, with the other parties on it directly underneath."""
+    # A party is routinely both owner and insured on one contract, so that
+    # policy appears under two headings. Naming the other role turns an
+    # apparent duplicate into the fact it actually is.
+    also = [r for r in roles_on[policy.policy_id] if r != policy.role]
+    also_chip = (f'<span class="chip">also {_esc(_words(also[0]))}</span>'
+                 if also else "")
+
+    money = policy.sum_assured_amount
+    cover = (f"{policy.currency_code or ''} {float(money):,.0f}".strip()
+             if money is not None else "—")
+
+    with_whom = ", ".join(
+        f"{_esc(other['full_name']) if revealed else MASK}"
+        f" ({_esc(_words(other['role']))}"
+        + (f", {_esc(other['stated_relationship'].lower())}"
+           if other.get("stated_relationship") else "")
+        + ")"
+        for other in policy.counterparties
+    ) or "no other party on this contract"
+
+    return (
+        '<div class="pol"><div class="top">'
+        f'<span class="num">{_esc(policy.policy_number)}</span>'
+        f'<span class="chip">{_esc(_words(policy.role))}</span>'
+        f'<span class="chip">{_esc(policy.policy_status)}</span>'
+        f"{also_chip}"
+        f'<span class="money">{_esc(cover)}</span></div>'
+        f'<div class="prod">{_esc(policy.product_name or "—")}'
+        f' · {_esc(policy.effective_date or "—")}</div>'
+        f'<div class="with">{with_whom}</div></div>'
+    )
+
+
+def _household_card(found: Any, revealed: bool) -> str:
+    out = ['<div class="card"><h2>Household</h2>']
+    if not found.household_id:
+        out.append('<p class="note">No household on record. Nothing the sources '
+                   "delivered links this party to another as family.</p></div>")
+        return "".join(out)
+
+    out.append('<p class="note">Built from the relationships the sources stated '
+               "at application, never from a shared address. Two people at one "
+               "postcode are two people.</p>")
+    for member in found.household_members:
+        evidence = (
+            f"{member['evidence_count']} polic"
+            f"{'y' if member['evidence_count'] == 1 else 'ies'}"
+            if member["stated"] else "same household, no direct edge"
+        )
+        name = _esc(member["full_name"]) if revealed else MASK
+        out.append(
+            f'<div class="rel">'
+            f'<a href="/console/person/{_esc(member["person_id"])}">{name}</a>'
+            f'<span class="chip">{_esc(member["relation"])}</span>'
+            f'<span class="ev">{_esc(evidence)}</span></div>'
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
+def _affiliation_card(found: Any) -> str:
+    out = ['<div class="card"><h2>Belongs to</h2>',
+           '<p class="note">Companies, trusts and estates. Deliberately not part '
+           "of the household — an employer is not family.</p>"]
+    if not found.affiliations:
+        out.append('<p class="note">No affiliation on record.</p></div>')
+        return "".join(out)
+    for entry in found.affiliations:
+        out.append(
+            f'<div class="rel">'
+            f'<a href="/console/person/{_esc(entry["person_id"])}">'
+            f'{_esc(entry["full_name"])}</a>'
+            f'<span class="chip">{_esc(entry.get("party_type"))}</span>'
+            f'<span class="chip">{_esc(entry["relation"])}</span>'
+            f'<span class="ev">{_esc(entry.get("evidence_count", 0))}</span></div>'
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
+def _sources_card(found: Any, revealed: bool) -> str:
+    out = ['<div class="card"><h2>Contributing sources</h2>',
+           '<p class="note">Every source key that resolves to this party. This '
+           "is the crosswalk — a golden record has no natural key.</p>",
+           '<div class="wide"><table><thead><tr><th>System</th><th>Kind</th>'
+           "<th>Key</th><th>Active</th><th>How</th></tr></thead><tbody>"]
+    for source in found.sources:
+        out.append(
             f"<tr><td>{_esc(source['source_system'])}</td>"
             f"<td>{_esc(source['source_key_kind'])}</td>"
-            f"<td>{_esc(source['source_party_key'] if revealed else '***')}</td>"
+            f'<td class="id">'
+            f"{_esc(source['source_party_key']) if revealed else MASK}</td>"
             f"<td>{'yes' if source['is_active'] else 'no'}</td>"
-            f"<td><span class=\"chip\">{_esc(source['derivation_method'])}</span></td></tr>"
+            f'<td><span class="chip">{_esc(source["derivation_method"])}</span>'
+            "</td></tr>"
         )
-    body.append("</tbody></table>")
+    out.append("</tbody></table></div></div>")
+    return "".join(out)
 
-    body.append("<h2>Why these values</h2>")
-    if lineage:
-        body.append('<p class="note">Only attributes the sources disagreed about '
-                    "appear here. Everything else was uncontested.</p>")
-        body.append("<table><thead><tr><th>Attribute</th><th>Surviving value</th>"
-                    "<th>Rule</th><th>Won from</th><th>Candidates</th>"
-                    "</tr></thead><tbody>")
-        for entry in lineage:
-            value = entry["value_text"] if revealed else "***"
-            body.append(
-                f"<tr><td>{_esc(entry['attribute_name'])}</td>"
-                f"<td>{_esc(value)}</td>"
-                f"<td><span class=\"chip\">{_esc(entry['strategy'])}</span></td>"
-                f"<td>{_esc(entry['winning_source_system'])}</td>"
-                f"<td>{_esc(entry['candidate_count'])}</td></tr>"
-            )
-        body.append("</tbody></table>")
-    else:
-        body.append('<p class="note">No contested attributes: every source that '
-                    "contributed to this record agreed.</p>")
 
-    body.append("<h2>Version history</h2><table><thead><tr><th>Version</th>"
-                "<th>From</th><th>To</th></tr></thead><tbody>")
-    for version in versions:
-        body.append(
+def _versions_card(found: Any) -> str:
+    out = ['<div class="card"><h2>Version history</h2>',
+           '<p class="note">A new version exists only where a business field '
+           "changed. Audit columns moving does not manufacture one.</p>",
+           '<div class="wide"><table><thead><tr><th>Version</th><th>From</th>'
+           "<th>To</th></tr></thead><tbody>"]
+    for version in found.versions:
+        out.append(
             f"<tr><td>{_esc(version['version'])}</td>"
             f"<td>{_esc(version['valid_from'])}</td>"
             f"<td>{_esc(version['valid_to']) if version['valid_to'] else 'current'}"
             "</td></tr>"
         )
-    body.append("</tbody></table>")
+    out.append("</tbody></table></div></div>")
+    return "".join(out)
 
-    return _page("Customer", principal, "".join(body), active="business")
+
+def _lineage_card(found: Any, revealed: bool) -> str:
+    out = ['<div class="card"><h2>Why these values</h2>']
+    if not found.lineage:
+        out.append('<p class="note">No contested attributes: every source that '
+                   "contributed to this record agreed.</p></div>")
+        return "".join(out)
+    out.append('<p class="note">Only attributes the sources disagreed about '
+               "appear here. Everything else was uncontested.</p>")
+    out.append('<div class="wide"><table><thead><tr><th>Attribute</th>'
+               "<th>Surviving value</th><th>Rule</th><th>Won from</th>"
+               "<th>Candidates</th></tr></thead><tbody>")
+    for entry in found.lineage:
+        out.append(
+            f"<tr><td>{_esc(entry['attribute_name'])}</td>"
+            f"<td>{_esc(entry['value_text']) if revealed else MASK}</td>"
+            f'<td><span class="chip">{_esc(entry["strategy"])}</span></td>'
+            f"<td>{_esc(entry['winning_source_system'])}</td>"
+            f"<td>{_esc(entry['candidate_count'])}</td></tr>"
+        )
+    out.append("</tbody></table></div></div>")
+    return "".join(out)
+
+
+def _considered_card(found: Any) -> str:
+    """What the matcher compared this party against, merged or not.
+
+    Both halves. A page showing only merges answers half the question people
+    bring to it: the golden record has no memory of a party it was decided
+    *not* to be, and the ledger is the only thing that does.
+    """
+    out = ['<div class="card"><h2>What the matcher considered</h2>',
+           '<p class="note">Parties compared against this one, merged or not. '
+           "The rejections are kept deliberately: “why are these two not the "
+           "same person” is asked as often as the opposite.</p>"]
+    if not found.considered:
+        out.append('<p class="note">Blocking never generated a candidate pair '
+                   "for this party — no other record shared a name, email, "
+                   "phone or address key with it, so nothing was ever "
+                   "compared.</p></div>")
+        return "".join(out)
+
+    keys = {str(s["source_party_key"]) for s in found.sources}
+    out.append('<div class="wide"><table><thead><tr><th>Other party</th>'
+               "<th>Score</th><th>Zone</th><th>Decision</th><th>Decided by</th>"
+               "<th>Model</th><th>AI</th></tr></thead><tbody>")
+    for entry in found.considered:
+        other = (entry["right_source_identity"]
+                 if entry["left_source_identity"] in keys
+                 else entry["left_source_identity"])
+        ai = (f"{float(entry['ai_score']):.3f}"
+              if entry["ai_score"] is not None else "—")
+        out.append(
+            f'<tr><td class="id">{_esc(other)}</td>'
+            f"<td class=\"num\">{float(entry['score']):.3f}</td>"
+            f'<td class="zone-{_esc(entry["zone"])}">{_esc(entry["zone"])}</td>'
+            f"<td>{_esc(entry['final_decision'])}</td>"
+            f'<td><span class="chip">{_esc(entry["decided_by"])}</span></td>'
+            f"<td>{_esc(entry['model_name'] or '—')}</td>"
+            f"<td>{_esc(ai)}</td></tr>"
+        )
+    out.append("</tbody></table></div></div>")
+    return "".join(out)
+
+
+def _words(value: Any) -> str:
+    return str(value).replace("_", " ").lower()
+
+
+_GROUP_LABEL = {
+    "owns": "Policies owned",
+    "insured": "Cover on this party",
+    "services": "Agent book",
+    "benefits": "Named as beneficiary",
+    "pays": "Pays the premium",
+    "other": "Other roles",
+}
+
+_GROUP_HINT = {
+    "owns": "Contracts this party holds. The owner is who the insurer deals with.",
+    "insured": "Policies whose benefit is payable on this party — not the same "
+               "set as the policies they own.",
+    "services": "Policies this party sells or services. A book, not a "
+                "relationship: an agent is not exposed to the sums assured, so "
+                "these are excluded from cover held.",
+    "benefits": "Policies naming this party as a beneficiary.",
+    "pays": "Policies this party pays for, whoever owns them.",
+    "other": "Roles that do not fall into the groups above.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Entity dashboard

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cmdm"
-version = "0.3.0"
+version = "0.4.0"
 description = "Open-source, Python-native Customer Master Data Management for insurance data"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -69,17 +69,6 @@ ai = [
     "onnxruntime>=1.18",
 ]
 
-# The Reflex console. Optional in the same sense as `ai`: the server-rendered
-# FastAPI console at /console is the one that has always shipped and still runs
-# with Reflex absent. This adds the reactive UI beside it.
-#
-# Reflex compiles a Vite/React frontend, which needs Node and ~200 MB of npm
-# packages -- none of which can exist on an offline target. It does not have to:
-# the compile happens where the bundle is built and produces ~650 KB of static
-# assets, which the Python backend then serves with no Node involved.
-ui = [
-    "reflex>=0.9.8",
-]
 
 dev = [
     "pytest>=8.0",

@@ -1,12 +1,14 @@
 """Everything known about one party, assembled once for every view of it.
 
-The console and the Reflex UI ask the same question -- "show me this customer"
--- and it is the same question the API answers. Writing the SQL three times
-would mean three chances for the views to disagree about what a customer *is*,
-and the one that disagreed quietly would be the one nobody checked.
+The console asks "show me this customer", and it is the same question the API
+answers. Writing the SQL twice would mean two chances for them to disagree about
+what a customer *is*, and the one that disagreed quietly would be the one nobody
+checked.
 
 So the queries live here and the views render what they return. Nothing in this
-module produces markup or knows which framework is calling it.
+module produces markup or knows what is calling it -- which is also what let the
+UI in front of it be replaced without touching a line of this file or any of its
+tests.
 
 **What a 360 has to contain to earn the name.** The golden record on its own is
 the least interesting part -- it is what the old page showed, and it answers

@@ -44,8 +44,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: warning has not silenced it anywhere the target can see until this file
 #: arrives. Both were found the same way: by a bundle failing its own
 #: verification after an update that reported success.
-PAYLOAD = ["src", "tests", "docs", "scripts", "rxapp", "README.md",
-           "pyproject.toml"]
+PAYLOAD = ["src", "tests", "docs", "scripts", "README.md", "pyproject.toml"]
 
 #: Named individually rather than by copying ``data/``. The sample extract is
 #: shipped content -- a release that adds a source column ships a sample
@@ -60,8 +59,7 @@ DATA_FILES = ["life_admin_sample.csv"]
 #: release can add a subcommand -- this one adds ``rebuild`` -- and the launcher
 #: has to be able to pass it through.
 SCRIPTS = ["update.py", "update.cmd", "update.sh", "verify.py",
-           "worker.cmd", "worker.sh", "rxconsole.cmd", "rxconsole.sh",
-           "OFFLINE-INSTALL.md"]
+           "worker.cmd", "worker.sh", "OFFLINE-INSTALL.md"]
 
 
 def run(argv: list[str]) -> None:
@@ -132,20 +130,7 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
         target = staging / name
         if source.is_dir():
             shutil.copytree(
-                source, target,
-                # `.web` is Reflex's build tree -- 200 MB of node_modules, on a
-                # build host only. A pack whose whole reason for existing is
-                # that it is small must not carry it, and a target has no Node
-                # to use it with anyway.
-                ignore=shutil.ignore_patterns(
-                    "__pycache__", ".web", "*.zip",
-                    # Reflex pickles live session state under .states.
-                    # It is a build host's own sessions -- including,
-                    # after any local sign-in, the API key that was
-                    # pasted in. Shipping it would put one machine's
-                    # credentials in every copy of the bundle.
-                    ".states", "*.pkl", "*.db",
-                ),
+                source, target, ignore=shutil.ignore_patterns("__pycache__")
             )
         else:
             shutil.copy2(source, target)
@@ -207,9 +192,11 @@ same files you already have.
 
 ## What is in this release
 
-**A Reflex console, and a real single-customer view.** A second UI beside the
-server-rendered one, on port 8100 (`rxconsole.cmd`). Its customer page shows one
-party as what it actually is -- a node in a graph -- rather than as a row:
+**A real single-customer view.** The customer page showed a golden record, its
+lineage and its household. That answers "what do we believe about this person"
+and leaves unanswered the question operators actually arrive with. A party in an
+insurance book is a node in a graph, and the page now draws every edge leaving
+it:
 
 * every policy owned, every policy whose benefit is payable on this party, and
   the agent book if there is one, each group labelled for what it means;
@@ -220,21 +207,13 @@ party as what it actually is -- a node in a graph -- rather than as a row:
 * the crosswalk, survivorship lineage, version history;
 * and what the matcher compared this party against, *including the pairs it
   refused* -- because "why are these two not the same person" is asked as often
-  as the opposite.
+  as the opposite, and the golden record has no memory of a party it was decided
+  not to be.
 
 The layout reflows on the container: panels fill a wide monitor in as many
-columns as fit and stack to one on a laptop, and the navigation collapses to a
-strip instead of hiding behind a menu.
-
-**It needs no Node and no network.** Reflex compiles a React frontend; that
-compile happened on the machine that built your bundle, and what ships is ~1.8 MB
-of static files served by a Python backend. If your bundle predates this release
-it has no `reflex` wheel, so `rxconsole` will say so and stop -- the update is
-still applied in full and everything else in it works. Ask for a fresh bundle to
-get the Reflex console itself.
-
-The server-rendered console at `/console` is unchanged and still carries
-ingestion, stewardship, rules, quality and export.
+columns as fit and stack to one on a laptop. No new dependency, no build step,
+no second server -- it is the same console on the same port, which is why it
+fits in this pack at all.
 
 **A model registry.** Which local model runs was an environment variable
 pointing at a file — swapping it was a deployment action with no measurement,
