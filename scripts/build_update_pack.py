@@ -113,7 +113,7 @@ def _declared_dependencies() -> set[str]:
     return names - {n.lower().replace("_", "-") for n in OPTIONAL_AT_RUNTIME}
 
 
-def build(out_dir: pathlib.Path) -> pathlib.Path:
+def build(out_dir: pathlib.Path, *, keep_staging: bool = False) -> pathlib.Path:
     version = _version()
     staging = out_dir / f"cmdm-update-{version}"
     if staging.exists():
@@ -175,6 +175,11 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
 
     size = archive.stat().st_size
     print(f"{archive}  {size / 1e6:.1f} MB, {len(rows)} files")
+
+    # The staging tree is the pack unpacked. Keeping it means every release
+    # leaves a second, larger copy of itself in dist/ forever.
+    if not keep_staging:
+        shutil.rmtree(staging)
     return archive
 
 
@@ -324,11 +329,16 @@ steward decisions keyed on the old identities do not carry over. Run
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scripts.build_update_pack")
     parser.add_argument("--out", default="dist", help="where to write the pack")
+    parser.add_argument(
+        "--keep-staging", action="store_true",
+        help="leave the unpacked tree beside the zip (for inspecting a build; "
+             "it is a full second copy of the pack)",
+    )
     args = parser.parse_args(argv)
 
     out_dir = (REPO / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    build(out_dir)
+    build(out_dir, keep_staging=args.keep_staging)
     return 0
 
 

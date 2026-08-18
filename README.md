@@ -40,6 +40,12 @@ identities), against a real PostgreSQL 16 instance. Reproduce with
 measured separately, against an extract whose duplicates are known:
 `python -m cmdm.worker evaluate --rows 2000 --duplicate-rate 0.18`.
 
+**Footprint.** The source is about 1.5 MB and the built wheel 268 KB. What grows
+is build output — bundles, packs, generated extracts, caches — none of which is
+tracked. `python -m scripts.clean --dry-run` lists it; without the flag, it goes.
+Everything that command removes is either git-ignored or reproducible by a
+command it names.
+
 ---
 
 ## The idea
@@ -157,6 +163,11 @@ src/cmdm/sql/
     006_match_pair_identity.sql  The ledger keys on what was compared
     007_households.sql      Households, affiliations, stated relationships
     008_model_registry.sql  Registered models, their evidence, their approver
+scripts/
+    generate_sample_data.py  The reference extract, and its ground truth
+    build_offline_bundle.py  The no-internet bundle
+    build_update_pack.py     A small update for a bundle already installed
+    clean.py                 Remove everything that can be rebuilt
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md

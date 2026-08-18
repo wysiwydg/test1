@@ -289,3 +289,62 @@ def test_the_bundle_does_not_carry_the_updater() -> None:
         "the updater is excluding a bundle script from its payload; only its "
         "own machinery belongs in OWN"
     )
+
+
+# ---------------------------------------------------------------------------
+# Housekeeping
+# ---------------------------------------------------------------------------
+
+
+def test_clean_never_targets_anything_git_tracks() -> None:
+    """The one property that makes a delete script safe to run without reading
+    it first. A working copy reached 612 MB against 1.5 MB of source, so a
+    clean command is worth having -- but only if it cannot take source with it.
+    """
+    import subprocess
+
+    from scripts.clean import SAMPLES, SWEEP, TARGETS
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True,
+    )
+    if tracked.returncode != 0:  # pragma: no cover - not a checkout
+        pytest.skip("not a git checkout")
+    paths = {line for line in tracked.stdout.splitlines() if line}
+
+    for name, _, _ in TARGETS:
+        assert name not in paths, f"clean would delete tracked {name}"
+        assert not any(p.startswith(f"{name}/") for p in paths), (
+            f"clean would delete tracked files under {name}/"
+        )
+    for name in SAMPLES:
+        assert name not in paths, f"clean --samples would delete tracked {name}"
+
+    # The sweep patterns are matched anywhere in the tree, so they are the ones
+    # that could catch a real directory by accident.
+    assert set(SWEEP) <= {"__pycache__", "*.egg-info"}
+
+
+def test_every_clean_target_says_how_to_get_it_back() -> None:
+    """An entry with no way back does not belong in the list -- that is the
+    whole argument for why deleting it is safe."""
+    from scripts.clean import TARGETS
+
+    for name, what, restore in TARGETS:
+        assert what and restore, f"{name} has no stated purpose or recovery"
+
+
+def test_a_build_does_not_leave_a_second_copy_of_itself() -> None:
+    """The staging tree is the archive, unpacked: 181 MB beside the 148 MB zip
+    built from it. Left behind, a few builds fill a disk with files that
+    already exist in the archive next to them."""
+    import inspect
+
+    from scripts import build_offline_bundle, build_update_pack
+
+    for module in (build_offline_bundle, build_update_pack):
+        source = inspect.getsource(module.build)
+        assert "keep_staging" in source and "rmtree(staging)" in source, (
+            f"{module.__name__} leaves its staging tree behind"
+        )

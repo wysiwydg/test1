@@ -107,7 +107,8 @@ def run(argv: list[str]) -> None:
         raise SystemExit(f"failed: {' '.join(argv)}")
 
 
-def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
+def build(platform: str, python: str, out_dir: pathlib.Path, *,
+          keep_staging: bool = False) -> pathlib.Path:
     staging = out_dir / f"cmdm-offline-{platform}-py{python.replace('.', '')}"
     if staging.exists():
         shutil.rmtree(staging)
@@ -150,7 +151,15 @@ def build(platform: str, python: str, out_dir: pathlib.Path) -> pathlib.Path:
             shutil.copy2(script, staging / script.name)
 
     _checksums(staging)
-    return _zip(staging, out_dir)
+    archive = _zip(staging, out_dir)
+
+    # The staging tree is the zip, uncompressed and unpacked -- 181 MB sitting
+    # beside the 148 MB archive built from it, useful only while the zip is
+    # being written. Left behind, three or four builds fill a disk with copies
+    # of files that already exist in the archive next to them.
+    if not keep_staging:
+        shutil.rmtree(staging)
+    return archive
 
 
 def _marker_environment(platform: str, python: str) -> dict[str, str]:
@@ -429,11 +438,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--split", type=int, metavar="MIB", default=0,
         help="also cut the zip into parts of at most MIB megabytes",
     )
+    parser.add_argument(
+        "--keep-staging", action="store_true",
+        help="leave the unpacked tree beside the zip (for inspecting a build; "
+             "it is a full second copy of the bundle)",
+    )
     args = parser.parse_args(argv)
 
     out_dir = (REPO / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    archive = build(args.platform, args.python, out_dir)
+    archive = build(args.platform, args.python, out_dir,
+                    keep_staging=args.keep_staging)
     if args.split:
         split(archive, chunk_mib=args.split)
     return 0
