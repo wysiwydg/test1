@@ -70,6 +70,20 @@ ai = [
 ]
 
 
+# Reading SAS extracts. Used only by scripts/sas2csv.py, which converts zipped
+# sas7bdat files to CSV for loading into Postgres, and which imports nothing
+# from cmdm -- it runs on whichever machine the extracts land on, which is not
+# usually this one. pandas rather than pyreadstat because pandas' sas7bdat
+# reader accepts a file-like object and therefore reads straight out of the zip:
+# a 500k x 200 extract is 800 MB uncompressed, and extracting it first is
+# several GB of scratch space per file and a copy of the source data left on
+# disk. pyreadstat is faster and needs a real path, so it is the opt-in
+# --reader fast, not the default.
+sas = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+]
+
 dev = [
     "pytest>=8.0",
     "pglast>=6.0",
