@@ -18,6 +18,9 @@ and probabilistic passes abstain.
 > run it: ingestion, stewardship and the business view, with the setup each needs.
 > [`docs/05-architecture-in-plain-language.md`](docs/05-architecture-in-plain-language.md)
 > — the same architecture for a business audience, with no code in it.
+> [`docs/06-sas7bdat-to-postgres.md`](docs/06-sas7bdat-to-postgres.md) — getting
+> zipped SAS extracts into Azure Postgres: streamed out of the zip, types
+> inferred from the data, offline on Windows.
 
 ### Measured, not asserted
 

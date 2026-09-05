@@ -38,7 +38,8 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: of these is safe: an entry with no way back does not belong in this list.
 TARGETS: list[tuple[str, str, str]] = [
     ("dist", "built bundles and update packs",
-     "python -m scripts.build_offline_bundle / build_update_pack"),
+     "python -m scripts.build_offline_bundle / build_update_pack / "
+     "build_sas2csv_bundle"),
     ("data/bench.csv", "benchmark extract, generated for one measurement",
      "python -m scripts.generate_sample_data --rows N --out data/bench.csv"),
     (".pytest_cache", "pytest cache", "rebuilt on the next run"),
