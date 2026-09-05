@@ -156,8 +156,12 @@ Postgres requires it:
   output, which is accurate for SAS and worth knowing before you write a
   constraint that depends on the difference.
 * **NUL bytes are removed and counted.** Postgres cannot store `\x00` in a text
-  value at all, so a char field containing one would fail the load. The
-  benchmark extract had 100,115 of them and the run said so.
+  value at all, and the two ways of loading disagree about what to do with one:
+  a server-side `COPY` refuses the file (`invalid byte sequence for encoding
+  "UTF8": 0x00`), while psql's `\copy` -- which is what the generated load
+  script uses -- silently truncates the value at the NUL and reports success.
+  The quiet one is the dangerous one, which is why they are stripped here and
+  counted. The benchmark extract had 100,115 of them and the run said so.
 * **Undecodable bytes are replaced, not fatal.** Decoding is done a column at a
   time rather than by the reader, so one bad byte in row 400,000 costs one
   character instead of the whole file. `--on-bad-bytes strict` fails instead.

@@ -831,11 +831,14 @@ def _text_to_list(
 
     Three things happen here that a CSV load depends on. SAS pads char fields to
     their declared width, and an all-blank field is how SAS spells missing, so
-    trailing blanks go and an empty result becomes null. A NUL byte inside a
-    char field is rejected by ``COPY`` outright -- it cannot be stored in a
-    Postgres text value at all -- so it is dropped and counted. And decoding is
-    done here rather than by the reader so that a single bad byte in row 400,000
-    replaces one character instead of failing the file.
+    trailing blanks go and an empty result becomes null. A NUL byte cannot be
+    stored in a Postgres text value at all, and the two ways of loading disagree
+    about it: a server-side ``COPY`` refuses the whole file, while psql's
+    ``\\copy`` truncates the value at the NUL and reports success. Since the
+    generated load script uses ``\\copy``, leaving one in place would lose the
+    rest of that value silently -- so it is dropped here and counted. And
+    decoding is done here rather than by the reader so that a single bad byte in
+    row 400,000 replaces one character instead of failing the file.
     """
     out: list[str | None] = []
     append = out.append
