@@ -61,6 +61,15 @@ embedded = [
     "pgserver>=0.1.4; python_version < '3.13'",
 ]
 
+# AML and transaction monitoring. The package itself is pure standard library —
+# deliberately, because it is deployed into compliance units where adding a
+# dependency means a security review. This extra covers the one optional
+# capability that cannot be written from the standard library: encrypting a
+# submission package before it leaves the building.
+filing = [
+    "cryptography>=42",
+]
+
 # Local open-source models for the fallback path, invoked only on the undecided
 # band. Optional in the strongest sense: with no model file present both AI
 # paths fall back to their reference implementations, which are pure Python,
@@ -79,11 +88,14 @@ dev = [
 
 # Everything the system actually needs to run.
 all = [
-    "cmdm[vector,store,api]",
+    "cmdm[vector,store,api,filing]",
 ]
 
+[project.scripts]
+aml = "aml.console:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/cmdm"]
+packages = ["src/cmdm", "src/aml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -108,4 +120,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/cmdm"]
+files = ["src/cmdm", "src/aml"]
+
+[[tool.mypy.overrides]]
+# Optional at runtime and imported inside the function that needs it, so a
+# deployment without the 'filing' extra never imports it at all.
+module = ["cryptography.*"]
+ignore_missing_imports = true

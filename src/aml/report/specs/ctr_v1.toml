@@ -1,0 +1,299 @@
+# Covered Transaction Report — working layout, version 1.
+#
+# WHAT THIS IS. A transcription of the particulars a covered transaction report
+# has to carry: who transacted, what identification was presented, what moved,
+# in which instrument, on which policy, and who is filing. It produces a
+# well-formed, complete, machine-readable CTR file today.
+#
+# WHAT IT IS NOT. It is not the AMLC's published schema, and the column names
+# and codes here are this package's own. Before the first live submission,
+# reconcile every `column` and every `values` mapping below against the schema
+# published with the AMLC's current registration and reporting guidelines for
+# your covered person type, then keep this file under change control like any
+# other regulatory artefact. Nothing else in the package needs to change when
+# you do: only the left-hand side of each field moves.
+
+[report]
+kind = "CTR"
+version = "1"
+name = "Covered Transaction Report"
+description = "One record per covered transaction, filed within five working days."
+authority = "Anti-Money Laundering Council"
+file_extension = "csv"
+delimiter = ","
+include_header = true
+encoding = "utf-8"
+filename_pattern = "{institution}_{kind}_{date}_{sequence}.{ext}"
+
+[[field]]
+column = "REPORT_TYPE"
+source = "report_type"
+required = true
+max_length = 3
+doc = "CTR."
+
+[[field]]
+column = "REPORT_REFERENCE"
+source = "report_reference"
+required = true
+max_length = 40
+doc = "The filer's own reference. Unique, and quoted in any AMLC query."
+
+[[field]]
+column = "INSTITUTION_CODE"
+source = "institution_code"
+required = true
+max_length = 20
+doc = "Code issued by the AMLC on registration."
+
+[[field]]
+column = "INSTITUTION_NAME"
+source = "institution_name"
+required = true
+max_length = 120
+
+[[field]]
+column = "BRANCH_CODE"
+source = "branch_code"
+max_length = 20
+
+[[field]]
+column = "TRANSACTION_REFERENCE"
+source = "transaction_reference"
+required = true
+max_length = 40
+
+[[field]]
+column = "TRANSACTION_DATE"
+source = "transaction_date"
+type = "date"
+format = "%Y-%m-%d"
+required = true
+
+[[field]]
+column = "TRANSACTION_TIME"
+source = "transaction_time"
+max_length = 8
+
+[[field]]
+column = "TRANSACTION_TYPE"
+source = "transaction_type"
+type = "enum"
+required = true
+max_length = 30
+
+[[field]]
+column = "PAYMENT_INSTRUMENT"
+source = "payment_instrument"
+type = "enum"
+required = true
+max_length = 30
+
+[[field]]
+column = "DELIVERY_CHANNEL"
+source = "delivery_channel"
+max_length = 30
+
+[[field]]
+column = "CURRENCY"
+source = "currency"
+required = true
+max_length = 3
+pattern = "^[A-Z]{3}$"
+
+[[field]]
+column = "AMOUNT"
+source = "amount"
+type = "decimal"
+format = "2"
+required = true
+
+[[field]]
+column = "AMOUNT_PHP"
+source = "amount_php"
+type = "decimal"
+format = "2"
+required = true
+doc = "Peso equivalent. The amount the threshold was applied to."
+
+[[field]]
+column = "EXCHANGE_RATE"
+source = "exchange_rate"
+max_length = 20
+
+[[field]]
+column = "POLICY_NUMBER"
+source = "policy_number"
+max_length = 40
+
+[[field]]
+column = "PRODUCT_LINE"
+source = "product_line"
+max_length = 40
+
+[[field]]
+column = "CUSTOMER_TYPE"
+source = "customer_type"
+type = "enum"
+required = true
+max_length = 1
+values = { INDIVIDUAL = "I", ORGANIZATION = "C", UNKNOWN = "I" }
+
+[[field]]
+column = "LAST_NAME"
+source = "last_name"
+required = true
+max_length = 60
+doc = "For an organisation, the registered name."
+
+[[field]]
+column = "FIRST_NAME"
+source = "first_name"
+max_length = 60
+
+[[field]]
+column = "MIDDLE_NAME"
+source = "middle_name"
+max_length = 60
+
+[[field]]
+column = "NAME_SUFFIX"
+source = "name_suffix"
+max_length = 10
+
+[[field]]
+column = "BIRTH_DATE"
+source = "birth_date"
+type = "date"
+format = "%Y-%m-%d"
+
+[[field]]
+column = "BIRTH_PLACE"
+source = "birth_place"
+max_length = 80
+
+[[field]]
+column = "GENDER"
+source = "gender"
+max_length = 1
+
+[[field]]
+column = "NATIONALITY"
+source = "nationality"
+max_length = 2
+
+[[field]]
+column = "COUNTRY_OF_RESIDENCE"
+source = "country_of_residence"
+max_length = 2
+
+[[field]]
+column = "ADDRESS"
+source = "address_line"
+max_length = 160
+
+[[field]]
+column = "CITY"
+source = "city"
+max_length = 60
+
+[[field]]
+column = "PROVINCE"
+source = "province"
+max_length = 60
+
+[[field]]
+column = "POSTAL_CODE"
+source = "postal_code"
+max_length = 10
+
+[[field]]
+column = "PHONE"
+source = "phone"
+max_length = 30
+
+[[field]]
+column = "EMAIL"
+source = "email"
+max_length = 80
+
+[[field]]
+column = "OCCUPATION"
+source = "occupation"
+max_length = 80
+
+[[field]]
+column = "EMPLOYER_OR_BUSINESS"
+source = "employer"
+max_length = 120
+
+[[field]]
+column = "ID_TYPE"
+source = "id_type"
+type = "enum"
+max_length = 20
+
+[[field]]
+column = "ID_NUMBER"
+source = "id_number"
+max_length = 40
+
+[[field]]
+column = "ID_ISSUING_COUNTRY"
+source = "id_issuing_country"
+max_length = 2
+
+[[field]]
+column = "TIN"
+source = "tin"
+max_length = 20
+
+[[field]]
+column = "COUNTERPARTY_NAME"
+source = "counterparty_name"
+max_length = 120
+
+[[field]]
+column = "COUNTERPARTY_RELATIONSHIP"
+source = "counterparty_relationship"
+max_length = 40
+
+[[field]]
+column = "COUNTERPARTY_BANK"
+source = "counterparty_bank"
+max_length = 120
+
+[[field]]
+column = "COUNTERPARTY_ACCOUNT"
+source = "counterparty_account"
+max_length = 40
+
+[[field]]
+column = "COUNTERPARTY_COUNTRY"
+source = "counterparty_country"
+max_length = 2
+
+[[field]]
+column = "DETECTION_BASIS"
+source = "detection_basis"
+max_length = 60
+doc = "Single transaction, or same-day aggregation."
+
+[[field]]
+column = "DATE_PREPARED"
+source = "date_prepared"
+type = "date"
+format = "%Y-%m-%d"
+required = true
+
+[[field]]
+column = "FILING_DEADLINE"
+source = "filing_deadline"
+type = "date"
+format = "%Y-%m-%d"
+
+[[field]]
+column = "COMPLIANCE_OFFICER"
+source = "compliance_officer"
+required = true
+max_length = 120

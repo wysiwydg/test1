@@ -20,3 +20,7 @@ pgdata/
 config.cmd
 config.sh
 
+
+# AML output: reports, packages, the spool directory and the case store.
+# Recreate with: python -m aml.console monitor / report / submit
+out/

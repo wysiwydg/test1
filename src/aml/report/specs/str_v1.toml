@@ -1,0 +1,309 @@
+# Suspicious Transaction Report — working layout, version 1.
+#
+# The same caution as the CTR layout applies in full: these column names and
+# codes are this package's own and must be reconciled with the AMLC's published
+# schema before a live submission.
+#
+# One structural note. An STR is filed about a *case*, not about a transaction:
+# it names the client, the suspicious circumstances relied on, and the
+# transactions that evidence them, which may be one or forty. The transaction
+# detail is therefore carried as delimited lists in this layout, and the
+# narrative is the substance of the report. If your schema files STRs one
+# transaction to a row instead, change `str_records` in `aml.report.build` —
+# the detection and workflow layers are unaffected either way.
+
+[report]
+kind = "STR"
+version = "1"
+name = "Suspicious Transaction Report"
+description = "One record per case, filed within five working days of determination."
+authority = "Anti-Money Laundering Council"
+file_extension = "csv"
+delimiter = ","
+include_header = true
+encoding = "utf-8"
+filename_pattern = "{institution}_{kind}_{date}_{sequence}.{ext}"
+
+[[field]]
+column = "REPORT_TYPE"
+source = "report_type"
+required = true
+max_length = 3
+
+[[field]]
+column = "REPORT_REFERENCE"
+source = "report_reference"
+required = true
+max_length = 40
+
+[[field]]
+column = "INSTITUTION_CODE"
+source = "institution_code"
+required = true
+max_length = 20
+
+[[field]]
+column = "INSTITUTION_NAME"
+source = "institution_name"
+required = true
+max_length = 120
+
+[[field]]
+column = "BRANCH_CODE"
+source = "branch_code"
+max_length = 20
+
+[[field]]
+column = "SUSPICIOUS_INDICATORS"
+source = "suspicious_indicators"
+type = "list"
+format = ";"
+required = true
+max_length = 60
+doc = "ST1-ST7. An STR must name at least one."
+
+[[field]]
+column = "UNLAWFUL_ACTIVITIES"
+source = "unlawful_activities"
+type = "list"
+format = ";"
+max_length = 120
+
+[[field]]
+column = "DETERMINATION_DATE"
+source = "determination_date"
+type = "date"
+format = "%Y-%m-%d"
+required = true
+doc = "When the institution determined the transaction suspicious. The clock starts here."
+
+[[field]]
+column = "FILING_DEADLINE"
+source = "filing_deadline"
+type = "date"
+format = "%Y-%m-%d"
+required = true
+
+[[field]]
+column = "TERRORISM_RELATED"
+source = "terrorism_related"
+type = "enum"
+max_length = 1
+values = { true = "Y", false = "N", True = "Y", False = "N" }
+
+[[field]]
+column = "PROPERTY_FROZEN"
+source = "property_frozen"
+type = "enum"
+max_length = 1
+values = { true = "Y", false = "N", True = "Y", False = "N" }
+
+[[field]]
+column = "CUSTOMER_TYPE"
+source = "customer_type"
+type = "enum"
+required = true
+max_length = 1
+values = { INDIVIDUAL = "I", ORGANIZATION = "C", UNKNOWN = "I" }
+
+[[field]]
+column = "LAST_NAME"
+source = "last_name"
+required = true
+max_length = 60
+
+[[field]]
+column = "FIRST_NAME"
+source = "first_name"
+max_length = 60
+
+[[field]]
+column = "MIDDLE_NAME"
+source = "middle_name"
+max_length = 60
+
+[[field]]
+column = "NAME_SUFFIX"
+source = "name_suffix"
+max_length = 10
+
+[[field]]
+column = "ALIASES"
+source = "aliases"
+type = "list"
+format = "; "
+max_length = 200
+
+[[field]]
+column = "BIRTH_DATE"
+source = "birth_date"
+type = "date"
+format = "%Y-%m-%d"
+
+[[field]]
+column = "BIRTH_PLACE"
+source = "birth_place"
+max_length = 80
+
+[[field]]
+column = "NATIONALITY"
+source = "nationality"
+max_length = 2
+
+[[field]]
+column = "COUNTRY_OF_RESIDENCE"
+source = "country_of_residence"
+max_length = 2
+
+[[field]]
+column = "ADDRESS"
+source = "address_line"
+max_length = 160
+
+[[field]]
+column = "CITY"
+source = "city"
+max_length = 60
+
+[[field]]
+column = "PROVINCE"
+source = "province"
+max_length = 60
+
+[[field]]
+column = "PHONE"
+source = "phone"
+max_length = 30
+
+[[field]]
+column = "EMAIL"
+source = "email"
+max_length = 80
+
+[[field]]
+column = "OCCUPATION"
+source = "occupation"
+max_length = 80
+
+[[field]]
+column = "EMPLOYER_OR_BUSINESS"
+source = "employer"
+max_length = 120
+
+[[field]]
+column = "PEP_STATUS"
+source = "pep_status"
+max_length = 40
+
+[[field]]
+column = "ID_TYPE"
+source = "id_type"
+type = "enum"
+max_length = 20
+
+[[field]]
+column = "ID_NUMBER"
+source = "id_number"
+max_length = 40
+
+[[field]]
+column = "ID_ISSUING_COUNTRY"
+source = "id_issuing_country"
+max_length = 2
+
+[[field]]
+column = "TIN"
+source = "tin"
+max_length = 20
+
+[[field]]
+column = "POLICY_NUMBERS"
+source = "policy_numbers"
+type = "list"
+format = ";"
+max_length = 400
+
+[[field]]
+column = "TRANSACTION_COUNT"
+source = "transaction_count"
+type = "integer"
+required = true
+
+[[field]]
+column = "TRANSACTION_REFERENCES"
+source = "transaction_references"
+type = "list"
+format = ";"
+max_length = 2000
+
+[[field]]
+column = "FIRST_TRANSACTION_DATE"
+source = "first_transaction_date"
+type = "date"
+format = "%Y-%m-%d"
+
+[[field]]
+column = "LAST_TRANSACTION_DATE"
+source = "last_transaction_date"
+type = "date"
+format = "%Y-%m-%d"
+
+[[field]]
+column = "TOTAL_AMOUNT_PHP"
+source = "total_amount_php"
+type = "decimal"
+format = "2"
+required = true
+
+[[field]]
+column = "CURRENCIES_INVOLVED"
+source = "currencies"
+type = "list"
+format = ";"
+max_length = 60
+
+[[field]]
+column = "COUNTERPARTIES"
+source = "counterparties"
+type = "list"
+format = "; "
+max_length = 500
+
+[[field]]
+column = "DETECTION_RULES"
+source = "detection_rules"
+type = "list"
+format = ";"
+max_length = 200
+doc = "Which rules produced the alerts behind this case. Not required by the schema; kept because the first question about an STR is how it was found."
+
+[[field]]
+column = "NARRATIVE"
+source = "narrative"
+required = true
+max_length = 8000
+doc = "The substance of the report: what happened, why it is suspicious, what the institution did."
+
+[[field]]
+column = "REPORTED_BY"
+source = "reported_by"
+max_length = 120
+
+[[field]]
+column = "APPROVED_BY"
+source = "approved_by"
+required = true
+max_length = 120
+
+[[field]]
+column = "DATE_PREPARED"
+source = "date_prepared"
+type = "date"
+format = "%Y-%m-%d"
+required = true
+
+[[field]]
+column = "COMPLIANCE_OFFICER"
+source = "compliance_officer"
+required = true
+max_length = 120

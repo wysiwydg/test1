@@ -18,6 +18,10 @@ and probabilistic passes abstain.
 > run it: ingestion, stewardship and the business view, with the setup each needs.
 > [`docs/05-architecture-in-plain-language.md`](docs/05-architecture-in-plain-language.md)
 > — the same architecture for a business audience, with no code in it.
+> [`docs/06-aml-and-transaction-monitoring.md`](docs/06-aml-and-transaction-monitoring.md)
+> — AML and transaction monitoring for a Philippine insurance covered person:
+> covered and suspicious transaction detection, name screening, CTR and STR
+> filing with the AMLC.
 
 ### Measured, not asserted
 
@@ -168,12 +172,27 @@ scripts/
     build_offline_bundle.py  The no-internet bundle
     build_update_pack.py     A small update for a bundle already installed
     clean.py                 Remove everything that can be rebuilt
+src/aml/                AML and transaction monitoring (pure standard library)
+    config.py           Thresholds, deadlines, screening, portal — the policy numbers
+    money.py            Exact amounts, and the reference rate a filing depends on
+    phcalendar.py       Philippine working days; the five-working-day clock
+    model/              Vocabularies, AMLC code tables, the entities
+    ingest/             Extract loading; the optional golden-record adapter
+    rules/              14 detection rules, declarative and reproducible
+    screening/          Name matching, World-Check, Dow Jones, local lists
+    case/               Alert and case ledger, four-eyes workflow, audit chain
+    report/             CTR and STR builders, renderers, validator
+    report/specs/       The field layouts, as versioned data
+    portal/             Deterministic packaging, spool and portal transports
+    demo/               A synthetic book with an answer key
+    console.py          The AML command line
 docs/
     01-canonical-data-model.md
     02-vectorized-ingestion.md
     03-architecture.md          Technical: storage, runtime path, the AI branches
     04-operating-the-consoles.md
     05-architecture-in-plain-language.md   The same, for a business audience
+    06-aml-and-transaction-monitoring.md   AML: detection, screening, CTR/STR filing
 scripts/
     bootstrap.py            Migrations + one API key per console audience
 ```
@@ -286,6 +305,93 @@ export CMDM_ID_HASH_KEY="…"   # never stored in the database
 - **A steward's verdict is an input to the next run**, recorded as a fixed edge
   rather than applied to the store. The book does not change under whoever is
   reading it, and the review is spent once.
+
+---
+
+# AML and Transaction Monitoring
+
+A second product in this repository, built on the same customer data:
+`src/aml` covers a Philippine insurance covered person's AML obligations —
+detect covered and suspicious transactions, screen names against sanctions and
+PEP lists, investigate under a four-eyes workflow, and file CTRs and STRs with
+the AMLC.
+
+Full documentation:
+[`docs/06-aml-and-transaction-monitoring.md`](docs/06-aml-and-transaction-monitoring.md).
+
+**Pure standard library.** No Arrow, no PostgreSQL, no HTTP client library, no
+database driver. It is deployed into compliance units where every added
+dependency is a security review, and it installs where it has to run. It works
+standalone against a flat extract, and reads the golden customer record when the
+MDM is deployed beside it — which is the difference between seeing one client
+with eight policies and seeing eight unrelated clients.
+
+### Measured, not asserted
+
+From `python -m aml.console demo`, which writes a synthetic book with one
+instance of each typology planted in a known place and an answer key beside it.
+
+| Stage | Result |
+|---|---|
+| Monitoring | 14 rules over 454 transactions and 60 clients in **18 ms** |
+| Detection | **10 of 10** planted typologies found |
+| False positives | **0** alerts against the 50 ordinary premium payers |
+| Covered transactions | 13, including a USD premium that only crosses the threshold once converted |
+| Screening | 60 subjects, a designated-person match at 1.00, 0 false positives |
+| Re-running | A second monitoring run creates **0** new alerts and updates 24 |
+| Reports | 13 CTR rows and 1 STR row, 0 blocking validation issues |
+| Determinism | Identical alert ids across runs; byte-identical submission packages |
+| Audit | Hash-chained; an altered or deleted entry is detected and named |
+| Tests | **99 passing in 2.3 s**, no database and no network |
+
+### A working day, in commands
+
+```bash
+aml init                                    # a documented aml.toml
+aml demo --dir data/aml-demo                # a synthetic book with an answer key
+aml monitor --actor j.dizon                 # run the rules over last night's extract
+aml screen  --actor j.dizon                 # screen the book against the lists
+aml alerts --show                           # what came out, worst first, with narratives
+aml case open --alert ALR-... --actor j.dizon          # opens with a drafted STR narrative
+aml case determine --case CASE-... --actor j.dizon     # starts the five-working-day clock
+aml case approve  --case CASE-... --approver r.villanueva   # a second person, always
+aml due                                     # what is running out of time
+aml report str --actor r.villanueva         # build and validate the file
+aml submit --report-id RPT-... --actor r.villanueva    # package, digest, send or spool
+aml verify                                  # prove the record has not been altered
+```
+
+### What is deliberate
+
+- **A covered transaction and a suspicious one take different paths.** The first
+  is filed because of what it is; the second only after a human determines it,
+  and the five-working-day clock runs from that determination — so determination
+  is a recorded event with a timestamp and an author.
+- **The regulator's file layout is data, not code.** The CTR and STR field
+  layouts live in versioned TOML. A schema change is an afternoon's edit under
+  change control, not a release. **They must be reconciled against the AMLC's
+  current published schema before the first live filing** — that is the one
+  thing in this package that cannot be verified from outside your enrolment.
+- **Deadlines are working days on the Philippine calendar.** A determination on
+  30 March 2026 is due 8 April, nine calendar days later, because Holy Week is
+  in the way. Holidays fixed by proclamation cannot be derived, so the tool
+  warns for any year where none are loaded rather than computing deadlines on an
+  optimistic calendar.
+- **Nothing is auto-confirmed and nothing is auto-filed.** The strongest
+  screening outcome is `POTENTIAL_MATCH`: confirming a sanctions match freezes a
+  client's property, and a person's name goes against that decision.
+- **A screening that failed is never recorded as a screening that found
+  nothing.** A vendor timeout leaves the result pending, with the error attached.
+- **No float ever touches an amount, and a peso equivalent is mandatory.** A
+  transaction with no reference rate for its date is an ingest error: the
+  threshold is in pesos, and treating a dollar figure as pesos understates it
+  fifty-six-fold.
+- **Alerts are identified by what they found**, so re-running monitoring after a
+  rule change updates them instead of duplicating them — and never reopens one an
+  analyst has already dispositioned.
+- **Every state change is hash-chained.** That does not make the record
+  unalterable; it makes alteration detectable, which is what matters when the
+  question is whether an alert was quietly closed after the fact.
 
 ## License
 
