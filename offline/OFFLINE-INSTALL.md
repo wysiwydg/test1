@@ -2,7 +2,8 @@
 
 Everything needed to run this on a Windows machine with **no internet**, **no
 database** and **no Python packages installed**. The only prerequisite is
-**CPython 3.13**.
+**CPython 3.11, 3.12, 3.13 or 3.14** — whichever the bundle was built for
+(the file name says which; `cmdm-offline-win_amd64-py313` is 3.13).
 
 ---
 
@@ -359,8 +360,8 @@ has no database, not a layer in front of one that does.
 
 ## If something goes wrong
 
-**"this bundle contains wheels for Python 3.13 only"** — the compiled packages
-cannot be used across Python versions. Run it with CPython 3.13, or ask for a
+**"this bundle contains wheels for Python 3.x only"** — the compiled packages
+cannot be used across Python versions. Run it with the matching CPython, or ask for a
 bundle rebuilt for the version you have. PostgreSQL is unaffected either way:
 it ships as plain executables in `pgsql/` and does not care which interpreter
 is running.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cmdm"
-version = "0.4.0"
+version = "0.5.0"
 description = "Open-source, Python-native Customer Master Data Management for insurance data"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,20 @@ license = { text = "Apache-2.0" }
 # means. Everything below is for the layers built on top of it.
 dependencies = []
 
+# Every runtime requirement carries an upper bound as well as a lower one.
+#
+# The lower bound says what the code needs. The upper bound says what has been
+# run. Without it a bundle built on any given day silently takes whatever pip
+# resolved that morning: polars went 1.43 -> 2.0 between two builds of this
+# project and nothing anywhere would have reported it. It happened to work --
+# the suite is green on polars 2 -- but "happened to work" is not a property
+# anyone can rely on, and the machine that finds out otherwise has no internet
+# to roll back from.
+#
+# Ceilings are the next major above what is tested, so raising one is a
+# deliberate act with a test run behind it. `python -m scripts.clean` has
+# nothing to do with this; to see what has moved, run
+# `pip list --outdated` against an installed environment.
 [project.optional-dependencies]
 # Vectorized layer: Arrow-backed column operations for normalization, blocking,
 # comparator scoring and survivorship.
@@ -26,27 +40,27 @@ dependencies = []
 # is no vectorized path without it. They were undeclared until an offline
 # install was attempted, which is the first thing that actually checks.
 vector = [
-    "pyarrow>=16",
-    "polars>=1.0",
-    "numpy>=1.26",
-    "scipy>=1.13",
+    "pyarrow>=16,<27",
+    "polars>=1.0,<3",
+    "numpy>=1.26,<3",
+    "scipy>=1.13,<2",
 ]
 
 # ACID golden store. The pool is a separate distribution from psycopg itself
 # and db/engine.py imports it at module scope, so it is named explicitly
 # rather than hoped for.
 store = [
-    "psycopg[binary]>=3.2",
-    "psycopg-pool>=3.2",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
 ]
 
 # API server, and the Prometheus exposition /metrics renders.
 api = [
-    "fastapi>=0.115",
-    "uvicorn>=0.30",
-    "pydantic>=2.8",
-    "python-multipart>=0.0.9",
-    "prometheus-client>=0.20",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "pydantic>=2.8,<3",
+    "python-multipart>=0.0.9,<1",
+    "prometheus-client>=0.20,<1",
 ]
 
 # A convenient way to get PostgreSQL binaries onto a development machine.
@@ -66,7 +80,7 @@ embedded = [
 # paths fall back to their reference implementations, which are pure Python,
 # and onnxruntime is never imported.
 ai = [
-    "onnxruntime>=1.18",
+    "onnxruntime>=1.18,<2",
 ]
 
 

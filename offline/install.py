@@ -30,7 +30,15 @@ VENV = HERE / ".venv"
 #: The set here is what this build *could* be; BUILT_FOR below is what it is.
 #: Installing under anything else fails with "no matching distribution", which
 #: is a confusing way to learn the bundle was built for a different Python.
-SUPPORTED = {(3, 11), (3, 12), (3, 13)}
+#:
+#: 3.14 is here because it is what a Windows machine set up today is likely to
+#: have, and a list that stops at the previous release turns "your Python is too
+#: new" into a refusal on a machine with no internet to install an older one
+#: with. The whole closure publishes cp314 wheels; pgserver does not, but it
+#: never did for the target version -- the bundle takes the PostgreSQL binaries
+#: out of whichever wheel exists and runs them as files, so the database does
+#: not constrain the interpreter.
+SUPPORTED = {(3, 11), (3, 12), (3, 13), (3, 14)}
 
 TOP_LEVEL = ["cmdm[vector,store,api]", "pytest", "httpx", "pglast"]
 

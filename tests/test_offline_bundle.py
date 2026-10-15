@@ -348,3 +348,91 @@ def test_a_build_does_not_leave_a_second_copy_of_itself() -> None:
         assert "keep_staging" in source and "rmtree(staging)" in source, (
             f"{module.__name__} leaves its staging tree behind"
         )
+
+
+# ---------------------------------------------------------------------------
+# Dependency policy
+# ---------------------------------------------------------------------------
+
+
+#: Extras a bundle installs. `dev` is excluded: ruff and mypy never reach a
+#: target, and capping a linter buys nothing.
+RUNTIME_EXTRAS = ("vector", "store", "api", "ai")
+
+
+def _pyproject() -> dict:
+    import tomllib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def test_every_runtime_dependency_has_an_upper_bound() -> None:
+    """The lower bound says what the code needs; the upper bound says what has
+    been run. Without one, a bundle takes whatever pip resolved on build day --
+    polars went 1.43 to 2.0 between two builds of this project and nothing
+    would have said so. It happened to work, which is not a property to ship
+    on, least of all to a machine with no internet to roll back from."""
+    from packaging.requirements import Requirement
+
+    extras = _pyproject()["project"]["optional-dependencies"]
+    missing = []
+    for extra in RUNTIME_EXTRAS:
+        for spec in extras.get(extra, []):
+            requirement = Requirement(spec)
+            operators = {s.operator for s in requirement.specifier}
+            if not operators & {"<", "<=", "==", "~="}:
+                missing.append(f"{extra}: {spec}")
+    assert not missing, "no upper bound on " + ", ".join(missing)
+
+
+def test_the_installed_versions_are_inside_the_declared_bounds() -> None:
+    """A bound nothing checks is a comment. This fails when the environment
+    actually running the suite has drifted outside what is declared -- which is
+    how a ceiling raised in pyproject but never installed, or a package
+    upgraded past one, gets noticed."""
+    import importlib.metadata as md
+
+    from packaging.requirements import Requirement
+
+    extras = _pyproject()["project"]["optional-dependencies"]
+    outside = []
+    for extra in RUNTIME_EXTRAS:
+        for spec in extras.get(extra, []):
+            requirement = Requirement(spec)
+            try:
+                installed = md.version(requirement.name)
+            except md.PackageNotFoundError:
+                continue  # optional extra, not installed in this environment
+            if not requirement.specifier.contains(installed, prereleases=True):
+                outside.append(f"{requirement.name} {installed} vs {requirement.specifier}")
+    assert not outside, "installed outside the declared range: " + ", ".join(outside)
+
+
+def test_the_installer_accepts_the_python_a_new_machine_will_have() -> None:
+    """A supported list that stops at the previous release turns "your Python is
+    too new" into a refusal on a machine with no internet to install an older
+    one with."""
+    import importlib.util
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = next(
+        (c for c in (root / "offline" / "install.py", root / "install.py")
+         if c.exists()), None,
+    )
+    if source is None:  # pragma: no cover - neither layout
+        pytest.skip("install.py not present in this layout")
+
+    spec = importlib.util.spec_from_file_location("cmdm_install_versions", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert (3, 14) in module.SUPPORTED, (
+        "cp314 wheels exist across this project's closure, so a bundle can be "
+        "built for 3.14; refusing it only strands the operator"
+    )
+    # The interpreter running this suite must itself be installable, or the
+    # bundle cannot run its own tests on the target.
+    import sys
+
+    assert sys.version_info[:2] in module.SUPPORTED

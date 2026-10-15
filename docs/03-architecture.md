@@ -160,9 +160,22 @@ zones.
                                      ├──> 18 merged
                                      └──> 79 held apart
 
-  1,796 pairs vetoed — conflicting DOB, or person vs legal entity.
+  ~1,800 pairs vetoed — conflicting DOB, or person vs legal entity.
   A veto outranks any score, including the model's.
+
+  A pair is also refused outright if nothing but the name agrees. Four
+  comparators read the name from different angles, so a pair carrying only
+  a name agrees four times over and scores 0.975 on a composite that
+  renormalises by the weight present — and no veto stops it, because
+  nothing conflicts. Merging requires at least one corroborating fact:
+  an identifier, a date of birth, or an address. A shared town and a
+  shared sex do not qualify; half a city has both.
 ```
+
+Counted apart from the vetoes on purpose. A veto says the two disagree; this
+says there is not enough to tell either way, and the engine distinguishes those
+everywhere else — a null comparator is "cannot tell", never "differs".
+
 
 | Threshold | Value | Why there |
 |---|---|---|

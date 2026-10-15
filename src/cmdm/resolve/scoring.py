@@ -46,6 +46,7 @@ __all__ = [
     "VETOES",
     "AUTO_MATCH_THRESHOLD",
     "AUTO_REJECT_THRESHOLD",
+    "MIN_CORROBORATION",
     "Zone",
     "score_pairs",
     "attach_attributes",
@@ -79,6 +80,16 @@ class Comparator:
     column: str
     weight: float
     build: object  # Callable[[pl.Expr, pl.Expr], pl.Expr]
+    #: Whether agreement here is evidence *beyond the name*.
+    #:
+    #: Two people share a name far more often than they share a date of birth,
+    #: an address or an email, which is why insurers key on those at all. Four
+    #: comparators read the name from different angles -- sorted tokens, a token
+    #: set, a prefix, a phonetic key -- so a pair carrying nothing but a name
+    #: still agrees four times over and scores 1.0 on the weighted mean. The
+    #: flag is what lets the gate below tell "four agreements" from "four
+    #: readings of one agreement".
+    corroborating: bool = True
 
     def evaluate(self) -> pl.Expr:
         left = pl.col(f"l_{self.column}")
@@ -165,15 +176,42 @@ COMPARATORS: tuple[Comparator, ...] = (
     Comparator("national_id", "national_id_hash", 3.0, _exact),
     Comparator("email", "email_normalized", 2.5, _exact),
     Comparator("phone", "phone_e164", 2.0, _exact),
-    Comparator("name_sorted", "name_sorted_key", 2.0, _exact),
-    Comparator("name_tokens", "full_name_normalized", 1.5, _jaccard_tokens),
-    Comparator("name_prefix", "full_name_normalized", 1.0, _prefix_similarity),
-    Comparator("name_phonetic", "name_phonetic_key", 1.2, _exact),
+    Comparator("name_sorted", "name_sorted_key", 2.0, _exact, corroborating=False),
+    Comparator("name_tokens", "full_name_normalized", 1.5, _jaccard_tokens,
+               corroborating=False),
+    Comparator("name_prefix", "full_name_normalized", 1.0, _prefix_similarity,
+               corroborating=False),
+    Comparator("name_phonetic", "name_phonetic_key", 1.2, _exact,
+               corroborating=False),
     Comparator("dob", "date_of_birth", 2.5, _date_within),
     Comparator("postcode", "postal_code", 0.8, _exact),
     Comparator("address", "address_key", 1.5, _exact),
     Comparator("gender", "gender", 0.3, _exact),
 )
+
+#: Corroborating weight a pair must carry before it may be merged at all.
+#:
+#: Set just above postcode (0.8) plus gender (0.3), and just below address
+#: (1.5), phone (2.0), email (2.5), date of birth (2.5) and national id (3.0).
+#: So one real identifier or one location clears it; a shared town and a shared
+#: sex do not, because half a city shares those.
+#:
+#: The hole this closes: two natural persons carrying the same name and nothing
+#: else score **0.975 and auto-match**, with no veto to stop them. The vetoes
+#: cover conflicts -- a date of birth that differs, a person against a legal
+#: entity -- and neither fires here, because there is nothing to conflict with.
+#: The composite renormalises by the weight that actually fired, so four name
+#: comparators agreeing with each other produce a near-perfect score off a
+#: single fact. "Michael Müller" is not rare.
+#:
+#: On the 4,000-row benchmark this changes no number: precision 0.896 and recall
+#: 0.593 either way, because the only name-only pairs that fixture produces are
+#: agent records against customer records, and the person-versus-entity veto
+#: already refuses those. It is a guard against a case the benchmark does not
+#: contain, kept because a real book contains it constantly, and proven by
+#: `test_two_people_sharing_a_name_are_not_merged_on_the_name_alone` rather than
+#: by a figure it does not move.
+MIN_CORROBORATION = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +262,9 @@ class ScoringReport:
     grey: int = 0
     auto_reject: int = 0
     vetoed: int = 0
+    #: Pairs refused for want of evidence beyond the name. Counted apart from
+    #: `vetoed` because a veto is a conflict and this is an absence.
+    under_corroborated: int = 0
     comparator_coverage: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -271,6 +312,7 @@ def score_pairs(
     vetoes: Sequence[Veto] = VETOES,
     auto_match: float = AUTO_MATCH_THRESHOLD,
     auto_reject: float = AUTO_REJECT_THRESHOLD,
+    min_corroboration: float = MIN_CORROBORATION,
     id_column: str = "person_id",
 ) -> tuple[pl.DataFrame, ScoringReport]:
     """Score candidate pairs and assign each to a zone.
@@ -317,6 +359,15 @@ def score_pairs(
     ]
     total_weight = sum(present)
 
+    # Weight of the evidence that is not the name. Summed over the comparators
+    # that actually fired, so it answers "what else do we have" rather than
+    # "what could we have had".
+    corroborating = [
+        (pl.col(f"cmp_{c.name}").is_not_null().cast(pl.Float64) * c.weight)
+        for c in active if c.corroborating
+    ]
+    corroboration = sum(corroborating) if corroborating else pl.lit(0.0)
+
     scored = scored.with_columns(
         pl.when(total_weight > 0)
         .then(sum(weighted) / total_weight)
@@ -324,6 +375,7 @@ def score_pairs(
         .clip(0.0, 1.0)
         .alias("score"),
         total_weight.alias("evidence_weight"),
+        corroboration.cast(pl.Float64).alias("corroboration"),
     )
 
     active_vetoes = [
@@ -342,10 +394,29 @@ def score_pairs(
     else:
         scored = scored.with_columns(pl.lit(False).alias("vetoed"))
 
+    scored = scored.with_columns(
+        (pl.col("corroboration") < min_corroboration).alias("under_corroborated")
+    )
+
     # Vetoes are applied after the sum, not as another weighted term. A term can
     # always be outvoted by enough agreeing attributes; a veto must not be.
+    #
+    # Under-corroboration sits beside the vetoes and is deliberately *not* one
+    # of them. A veto says the two disagree; this says there is not enough here
+    # to tell either way, and the module draws that distinction everywhere else
+    # -- a null comparator is "cannot tell", never "differs". Counting them
+    # together would make the veto figure mean two things at once.
+    #
+    # It outranks the score for the same reason a veto does, and it outranks the
+    # model too: the grey-zone classifier reads the same columns the
+    # comparators did, so routing a pair there that carries only a name asks a
+    # second opinion of someone holding no more evidence than the first. The
+    # pair is still written to the ledger and still visible on the party's page
+    # under what the matcher considered, so an unmerged duplicate stays
+    # findable -- which is the whole reason rejecting is the safer default than
+    # merging.
     scored = scored.with_columns(
-        pl.when(pl.col("vetoed"))
+        pl.when(pl.col("vetoed") | pl.col("under_corroborated"))
         .then(pl.lit(Zone.AUTO_REJECT))
         .when(pl.col("score") >= auto_match)
         .then(pl.lit(Zone.AUTO_MATCH))
@@ -361,11 +432,13 @@ def score_pairs(
     report.grey = by_zone.get(Zone.GREY, 0)
     report.auto_reject = by_zone.get(Zone.AUTO_REJECT, 0)
     report.vetoed = int(scored["vetoed"].sum())
+    report.under_corroborated = int(scored["under_corroborated"].sum())
     report.comparator_coverage = {
         c.name: float(scored[f"cmp_{c.name}"].is_not_null().mean() or 0.0) for c in active
     }
 
-    keep = ["left_id", "right_id", "score", "zone", "vetoed", "evidence_weight"]
+    keep = ["left_id", "right_id", "score", "zone", "vetoed", "evidence_weight",
+            "corroboration", "under_corroborated"]
     if "blocking_keys" in scored.columns:
         keep.append("blocking_keys")
     keep += [f"cmp_{c.name}" for c in active]

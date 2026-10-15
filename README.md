@@ -27,7 +27,8 @@ and probabilistic passes abstain.
 | Standardization | deterministic pass **86.3%**, gate pass **99.1%** after the model, AI share **13.0%** |
 | Blocking | 2.9M possible pairs → 11,931 candidates, **243× reduction** |
 | Grey zone | **0.81%** of candidate pairs reach a model; 18 merged, 79 held apart |
-| Vetoes | 1,796 pairs refused on conflicting DOB or person-vs-entity, whatever they scored |
+| Vetoes | ~1,800 pairs refused on conflicting DOB or person-vs-entity, whatever they scored |
+| Corroboration | name agreement alone never merges: a pair needs an identifier, a date of birth or an address |
 | Full pipeline | 5,000 policies → 2,389 golden persons, 15,000 edges, 597 households in **~4 s**, one transaction |
 | Re-processing | writes **0 changes**, 22,389 rows unchanged |
 | Householding | 597 households, **every one a single real family**, 0 flatmates wrongly included, 81.4% of real families found |
@@ -35,7 +36,11 @@ and probabilistic passes abstain.
 | Match quality | on a benchmark with a known answer key: precision **0.94**, recall **0.72**, blocking recall **0.93** |
 
 All figures from `data/life_admin_sample.csv` (5,000 policies, 2,407 source
-identities), against a real PostgreSQL 16 instance. Reproduce with
+identities), against a real PostgreSQL 16 instance. Entity counts — golden
+persons, households, policies, edges — are stable run to run. **Pair-level
+counts are not**: candidate pairs and vetoes vary by a few tenths of a percent
+between identical runs (11,902–11,953 observed), so they are quoted to the
+nearest hundred rather than pinned to one observation. Reproduce with
 `python -m scripts.generate_sample_data` then `./verify.sh`. Match quality is
 measured separately, against an extract whose duplicates are known:
 `python -m cmdm.worker evaluate --rows 2000 --duplicate-rate 0.18`.

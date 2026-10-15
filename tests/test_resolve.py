@@ -26,6 +26,7 @@ from cmdm.resolve.scoring import (
     AUTO_MATCH_THRESHOLD,
     AUTO_REJECT_THRESHOLD,
     COMPARATORS,
+    MIN_CORROBORATION,
     Zone,
     score_pairs,
 )
@@ -575,3 +576,93 @@ def test_thresholds_are_stored_with_the_run(conn) -> None:
         "WHERE run_id = %s", (report.run_id,)
     ).fetchone()
     assert row == (0.9, 0.4)
+
+
+# ---------------------------------------------------------------------------
+# Corroboration: name agreement is not, by itself, an identity
+# ---------------------------------------------------------------------------
+
+
+def _name_only_pair():
+    """Two natural persons, one name, nothing else to compare.
+
+    Deliberately constructed so no veto applies: same party type, and neither
+    side carries a date of birth, so there is nothing to conflict with. The
+    vetoes answer "these disagree"; this pair does not disagree about anything,
+    it simply has almost nothing to agree about.
+    """
+    parties = pl.DataFrame(
+        {
+            "person_id": ["a", "b"],
+            "full_name_normalized": ["michael muller", "michael muller"],
+            "name_sorted_key": ["michael muller", "michael muller"],
+            "name_phonetic_key": ["M240", "M240"],
+            "party_type": ["PERSON", "PERSON"],
+            "date_of_birth": [None, None],
+            "email_normalized": [None, None],
+            "phone_e164": [None, None],
+            "postal_code": [None, None],
+            "address_key": [None, None],
+            "gender": [None, None],
+            "national_id_hash": [None, None],
+        },
+        schema_overrides={"date_of_birth": pl.Date},
+    )
+    return pl.DataFrame({"left_id": ["a"], "right_id": ["b"]}), parties
+
+
+def test_two_people_sharing_a_name_are_not_merged_on_the_name_alone() -> None:
+    """Four comparators read the name from different angles, so a pair holding
+    nothing but a name agrees four times over and scores 0.975 on a composite
+    that renormalises by the weight present. Nothing else in the engine stops
+    it: no value conflicts, so no veto fires. "Michael Müller" is not rare."""
+    pairs, parties = _name_only_pair()
+
+    without = score_pairs(pairs, parties, min_corroboration=0.0)[0].row(0, named=True)
+    assert without["score"] > 0.9 and not without["vetoed"], (
+        "the fixture no longer reproduces the case it exists for"
+    )
+    assert without["zone"] == Zone.AUTO_MATCH, "expected the unguarded merge"
+
+    with_gate = score_pairs(pairs, parties)[0].row(0, named=True)
+    assert with_gate["zone"] == Zone.AUTO_REJECT
+    assert with_gate["corroboration"] == 0.0
+
+
+def test_under_corroboration_is_counted_apart_from_a_veto() -> None:
+    """A veto says the two disagree; this says there is not enough to tell.
+    Folding them into one figure would make the veto count mean two things,
+    and the module draws that distinction everywhere else -- a null comparator
+    is "cannot tell", never "differs"."""
+    pairs, parties = _name_only_pair()
+    _, report = score_pairs(pairs, parties)
+
+    assert report.under_corroborated == 1
+    assert report.vetoed == 0
+
+
+def test_one_real_identifier_is_enough_to_clear_the_floor() -> None:
+    """The floor must not block ordinary sparse records. A shared email is a
+    single corroborating fact and it is worth more than any amount of name."""
+    pairs, parties = _name_only_pair()
+    parties = parties.with_columns(
+        pl.Series("email_normalized", ["m.muller@example.com"] * 2)
+    )
+
+    scored = score_pairs(pairs, parties)[0].row(0, named=True)
+    assert scored["corroboration"] >= MIN_CORROBORATION
+    assert scored["zone"] == Zone.AUTO_MATCH
+
+
+def test_a_shared_town_and_sex_do_not_clear_the_floor() -> None:
+    """Postcode and gender together are 1.1, below the floor on purpose: half a
+    city shares both, so they corroborate a name much less than they appear to."""
+    pairs, parties = _name_only_pair()
+    parties = parties.with_columns(
+        pl.Series("postal_code", ["M1 4AB"] * 2),
+        pl.Series("gender", ["MALE"] * 2),
+    )
+
+    scored = score_pairs(pairs, parties)[0].row(0, named=True)
+    assert 0 < scored["corroboration"] < MIN_CORROBORATION
+    assert scored["zone"] == Zone.AUTO_REJECT

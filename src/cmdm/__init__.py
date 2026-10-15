@@ -5,4 +5,4 @@ Postgres, and local open-source models invoked only where deterministic and
 probabilistic passes abstain.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
